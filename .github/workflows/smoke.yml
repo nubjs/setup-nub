@@ -1,0 +1,145 @@
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1" # weekly — catch drift in npm/runner images
+  workflow_dispatch:
+
+jobs:
+  install:
+    name: install + PATH (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup-nub (latest)
+        id: nub
+        uses: ./
+        with:
+          nub-version: latest
+
+      - name: nub is on PATH and output is a bare v<semver>
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub --version
+          out="${{ steps.nub.outputs.nub-version }}"
+          echo "nub-version output: $out"
+          [[ "$out" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::bad nub-version output: $out"; exit 1; }
+
+      - name: pinned nub-version installs exactly
+        id: pinned
+        uses: ./
+        with:
+          nub-version: 0.0.47
+      - shell: bash
+        run: |
+          [[ "${{ steps.pinned.outputs.nub-version }}" == "v0.0.47" ]] || { echo "::error::expected v0.0.47, got ${{ steps.pinned.outputs.nub-version }}"; exit 1; }
+
+  bare-run:
+    name: nub provisions Node + installs unaided (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+      - name: tiny fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke && cd smoke
+          echo "20" > .node-version
+          echo '{"name":"smoke","private":true,"dependencies":{"left-pad":"1.3.0"}}' > package.json
+          echo "console.log('ok')" > main.ts
+          nub install
+          nub main.ts
+
+  pre-provision:
+    name: node-version pre-provision + output (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: fixture pinned to 20
+        shell: bash
+        run: |
+          mkdir -p smoke && cd smoke && echo "20" > .node-version
+      - uses: ./
+        id: nub
+        with:
+          node-version: "20"
+      - shell: bash
+        working-directory: smoke
+        run: |
+          set -euo pipefail
+          nub node ls
+          echo "node-version output: ${{ steps.nub.outputs.node-version }}"
+          [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x"; exit 1; }
+
+  cache:
+    name: cache round-trip (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: fixture
+        shell: bash
+        run: |
+          mkdir -p smoke && cd smoke
+          echo '{"name":"c","private":true,"dependencies":{"left-pad":"1.3.0"}}' > package.json
+      - name: setup-nub with cache
+        id: c1
+        uses: ./
+        with:
+          cache: "true"
+          cache-dependency-path: smoke/package.json
+      - shell: bash
+        working-directory: smoke
+        run: |
+          echo "cache-hit: ${{ steps.c1.outputs.cache-hit }}"
+          time nub install
+      # NOTE: a true warm-hit assertion needs a second run — within one job
+      # actions/cache won't re-restore. The cache is saved at job end; a re-run
+      # of this workflow exercises the warm path. Informational here.
+
+  auth-npmrc:
+    name: registry .npmrc shape (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@nubjs"
+          always-auth: "true"
+      - name: assert .npmrc contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          npmrc="${RUNNER_TEMP}/.npmrc"
+          echo "NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG:-<unset>}"
+          [ "${NPM_CONFIG_USERCONFIG:-}" = "$npmrc" ] || { echo "::error::NPM_CONFIG_USERCONFIG not exported to $npmrc"; exit 1; }
+          cat "$npmrc"
+          grep -q '@nubjs:registry=https://npm.pkg.github.com/' "$npmrc"
+          grep -q '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' "$npmrc"
+          grep -q 'always-auth=true' "$npmrc"
