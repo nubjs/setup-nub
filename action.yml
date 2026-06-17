@@ -229,6 +229,9 @@ runs:
         # The authoritative project pin nub will actually run (path on stdout; we
         # read the version dir name after node/).
         resolved="$(nub node which 2>/dev/null || true)"
+        # Normalize Windows backslash paths so the forward-slash extraction below
+        # works on every OS (no-op on POSIX paths).
+        resolved="${resolved//\\//}"
         # <cache>/node/<version>/... — the dir component after node/ is the version.
         ver="$(echo "$resolved" | sed -n 's#.*/node/\([^/]*\)/.*#\1#p')"
         if [ -n "$want" ] && [ -n "$ver" ] && [ "$ver" != "$want" ]; then
