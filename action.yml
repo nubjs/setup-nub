@@ -8,7 +8,7 @@ branding:
 
 inputs:
   nub-version:
-    description: "Version of nub to install — any semver range npm understands (0.0.47, ^0.0, latest). Default: latest."
+    description: "Version of nub to install — any semver range npm understands (0.0.47, ^0.1.0, latest). Default: latest."
     required: false
     default: "latest"
   version:
@@ -29,13 +29,13 @@ inputs:
     description: "Lockfile path(s) whose hash keys the cache. Supports globs / newline-delimited lists. Default: auto-detect the project's lockfile."
     required: false
   registry-url:
-    description: "Registry to set up for auth. Writes a project-level .npmrc (the neutral file nub's PM reads) and wires auth to env.NODE_AUTH_TOKEN."
+    description: "Registry to set up for auth. Writes a temporary user-level .npmrc (via NPM_CONFIG_USERCONFIG; the neutral file nub's PM reads) and wires auth to env.NODE_AUTH_TOKEN."
     required: false
   scope:
     description: "Scope for a scoped registry. Falls back to the repository owner for GitHub Packages (npm.pkg.github.com)."
     required: false
   always-auth:
-    description: "Write always-auth=true into the project .npmrc."
+    description: "Write always-auth=true into the temporary user-level .npmrc."
     required: false
     default: "false"
   token:
@@ -98,6 +98,30 @@ runs:
         echo "Installed nub ${installed}"
         echo "nub-version=${installed}" >> "$GITHUB_OUTPUT"
 
+    # 1b. Normalize the `cache` input. setup-nub's `cache` is a BOOLEAN, but
+    #     setup-node's `cache` takes a PM name (npm/yarn/pnpm/bun). A mechanical
+    #     drop-in that leaves `cache: npm` in place would compare unequal to
+    #     'true' and silently disable caching. So treat any non-empty value that
+    #     isn't literally false as truthy, and note when a PM name was passed.
+    - name: Normalize cache input
+      id: cacheflag
+      shell: bash
+      env:
+        CACHE_IN: ${{ inputs.cache }}
+      run: |
+        set -euo pipefail
+        raw="$CACHE_IN"
+        lc="$(echo "$raw" | tr '[:upper:]' '[:lower:]')"
+        case "$lc" in
+          ""|false|"0"|no|off) enabled=false ;;
+          *)                    enabled=true  ;;
+        esac
+        case "$lc" in
+          npm|yarn|pnpm|bun)
+            echo "::notice::setup-nub's \`cache\` is a boolean (nub has one store regardless of package manager); the value \"${raw}\" enables caching." ;;
+        esac
+        echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
     # 2. Resolve the cache paths from nub itself (never hardcode XDG layout).
     #    `nub store path` prints the resolved CAS store dir on stdout. The Node
     #    toolchain dir is <cache>/node; derive <cache> from XDG with the ~/.cache
@@ -105,7 +129,7 @@ runs:
     #    re-fetchable; a wrong path is a cheap miss, not breakage).
     - name: Resolve cache paths
       id: cachepaths
-      if: inputs.cache == 'true'
+      if: steps.cacheflag.outputs.enabled == 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -121,7 +145,7 @@ runs:
     #    the auto-detected lockfile glob).
     - name: Compute cache key
       id: cachekey
-      if: inputs.cache == 'true'
+      if: steps.cacheflag.outputs.enabled == 'true'
       shell: bash
       env:
         DEP_PATH: ${{ inputs.cache-dependency-path }}
@@ -143,7 +167,7 @@ runs:
     #    a partial warm hit even on a fresh lockfile (huge over cold).
     - name: Cache nub store
       id: cache
-      if: inputs.cache == 'true'
+      if: steps.cacheflag.outputs.enabled == 'true'
       uses: actions/cache@v4
       with:
         path: |
@@ -202,30 +226,66 @@ runs:
         echo "NPM_CONFIG_USERCONFIG=${npmrc}" >> "$GITHUB_ENV"
         echo "Wrote registry auth to ${npmrc}"
 
-    # 6. Pre-provision Node (warm-up only). Resolve from node-version (preferred)
-    #    or node-version-file, install it into nub's cache, and emit the resolved
-    #    project pin as the node-version output. A mismatch with the project's
-    #    declared pin is a warning — nub's runtime pin always wins.
-    - name: Pre-provision Node
+    # 6. Eagerly provision the project's Node so later steps are WARM. This runs
+    #    UNCONDITIONALLY — the common (no-input) case is the whole point: a bare
+    #    `nub node install` resolves the full pin chain (devEngines.runtime ->
+    #    .node-version -> .nvmrc -> engines.node), resolves ranges against the
+    #    live Node index, and installs the concrete version up front, instead of
+    #    nub downloading it lazily mid-build. An explicit node-version /
+    #    node-version-file still wins as a warm-up override. A "no pin" project
+    #    is fine (skip gracefully); any other failure is a warning, not a fail —
+    #    nub provisions lazily at runtime as a fallback. The resolved pin is
+    #    emitted as the node-version output.
+    #
+    #    NOTE: this reads the project's pin files off disk, so actions/checkout
+    #    MUST run before setup-nub.
+    - name: Provision Node
       id: provision
-      if: inputs.node-version != '' || inputs.node-version-file != ''
       shell: bash
       env:
         NODE_VERSION: ${{ inputs.node-version }}
         NODE_VERSION_FILE: ${{ inputs.node-version-file }}
       run: |
         set -euo pipefail
+
+        # Soft checkout-first hint: with no pin files on disk, the repo probably
+        # wasn't checked out yet. Don't fail — just nudge.
+        if [ ! -e package.json ] && [ ! -e .node-version ] && [ ! -e .nvmrc ]; then
+          echo "::warning::No package.json / .node-version / .nvmrc found in the working directory — did actions/checkout run before setup-nub? Eager Node provisioning needs the project's pin files on disk."
+        fi
+
         want="$NODE_VERSION"
         if [ -z "$want" ] && [ -n "$NODE_VERSION_FILE" ] && [ -f "$NODE_VERSION_FILE" ]; then
           case "$NODE_VERSION_FILE" in
-            *.json) want="$(node -p "try{require('./'+process.argv[1]).engines?.node||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
+            # Prefer devEngines.runtime.version (nub's primary signal), then fall
+            # back to engines.node — never just engines.node.
+            *.json) want="$(node -p "try{const p=require('./'+process.argv[1]);const r=p.devEngines&&p.devEngines.runtime;(r&&r.version)||(p.engines&&p.engines.node)||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
             *)      want="$(head -n1 "$NODE_VERSION_FILE" | tr -d 'v[:space:]')" ;;
           esac
         fi
+
         if [ -n "$want" ]; then
-          echo "Pre-provisioning Node ${want} into nub's cache"
+          # Explicit warm-up override.
+          echo "Provisioning Node ${want} into nub's cache"
           nub node install "$want" || echo "::warning::nub node install ${want} failed; nub will provision lazily at runtime"
+        else
+          # Common case: resolve + install the project's own pin chain. A bare
+          # `nub node install` exits non-zero with a "no Node pin" message when
+          # the project declares no pin — that is expected, skip gracefully.
+          echo "Eagerly provisioning the project's pinned Node"
+          out=""
+          rc=0
+          out="$(nub node install 2>&1)" || rc=$?
+          [ -n "$out" ] && echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            if printf '%s' "$out" | grep -qi 'no Node pin'; then
+              echo "No Node pin declared by this project; skipping eager provision (nub provisions lazily at runtime)."
+            else
+              echo "::warning::eager Node provision failed (exit ${rc}); nub will provision lazily at runtime"
+            fi
+          fi
         fi
+
         # The authoritative project pin nub will actually run (path on stdout; we
         # read the version dir name after node/).
         resolved="$(nub node which 2>/dev/null || true)"
