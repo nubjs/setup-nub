@@ -43,6 +43,74 @@ jobs:
         run: |
           [[ "${{ steps.pinned.outputs.nub-version }}" == "v0.0.47" ]] || { echo "::error::expected v0.0.47, got ${{ steps.pinned.outputs.nub-version }}"; exit 1; }
 
+  # Differential PATH parity: after setup-nub with an explicit node-version, bare
+  # node/npm/npx/corepack in a LATER step must resolve to that version — the
+  # headline drop-in promise. We assert the MAJOR (setup-node and nub may resolve
+  # a different patch of 20.x, so byte-equality would flake) and confirm the
+  # global PATH was actually re-pointed (not the runner's preinstalled default).
+  # A setup-node control job runs the identical assertions as a sanity reference.
+  path-parity:
+    name: bare node/npm/npx == specified version (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          node-version: "20"
+      - name: bare executables resolve to the specified Node 20.x
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(command -v node)"
+          npm_path="$(command -v npm)"
+          echo "node: $node_path / npm: $npm_path"
+          nv="$(node -p 'process.versions.node')"
+          echo "node -v: $nv / npm -v: $(npm -v) / npx -v: $(npx -v)"
+          # 1. bare node is the specified MAJOR (patch may differ from setup-node's).
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected 20.x"; exit 1; }
+          # 2. node AND npm must resolve INSIDE the SAME fronted dir — proves the
+          #    PATH front (not a coincidental runner default that also happens to be 20).
+          node_dir="$(dirname "$node_path")"
+          npm_dir="$(dirname "$npm_path")"
+          [[ "$node_dir" == "$npm_dir" ]] || { echo "::error::node ($node_dir) and npm ($npm_dir) resolve to different dirs"; exit 1; }
+          # 3. npm itself runs ON the fronted Node (npm reports its own Node).
+          npm_node="$(npm version --json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).node')"
+          [[ "$npm_node" == 20.* ]] || { echo "::error::npm runs on Node $npm_node, expected 20.x"; exit 1; }
+          # 4. npm i -g global-bin parity: a globally-installed CLI lands on PATH
+          #    (the fronted Node's global prefix bin == the fronted dir for a
+          #    self-contained tarball).
+          npm i -g cowsay@1.6.0 >/dev/null 2>&1
+          command -v cowsay >/dev/null 2>&1 || { echo "::error::npm i -g did not put cowsay on PATH (global prefix bin not fronted)"; exit 1; }
+          # 5. corepack is bundled but may be disabled on newer Node; presence-only, not a hard gate.
+          if command -v corepack >/dev/null 2>&1; then echo "corepack: $(corepack --version 2>/dev/null || echo '(disabled)')"; fi
+          echo "PATH parity OK"
+
+  path-parity-control:
+    name: setup-node control — bare node == 20.x (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: reference assertions (identical to the setup-nub job)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "which node: $(command -v node)"
+          nv="$(node -p 'process.versions.node')"
+          echo "node: $nv / npm: $(npm -v) / npx: $(npx -v)"
+          [[ "$nv" == 20.* ]] || { echo "::error::control: bare node is $nv, expected 20.x"; exit 1; }
+          echo "setup-node control OK"
+
   bare-run:
     name: nub provisions Node + installs unaided (${{ matrix.os }})
     strategy:

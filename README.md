@@ -9,7 +9,7 @@ Install the [nub](https://github.com/nubjs/nub) CLI on a GitHub Actions runner. 
 - run: nub run build
 ```
 
-That's the whole story for most projects: setup-nub puts `nub` on PATH, **eagerly provisions the project's pinned Node** (resolved from `.node-version` / `.nvmrc` / `package.json`) so the first build step is warm instead of paying a Node download mid-build, **caches nub's store across runs by default**, and reads a standard `.npmrc` for registry auth.
+That's the whole story for most projects: setup-nub puts `nub` on PATH, **provisions the right Node and fronts its bin dir on the global PATH** (so bare `node`/`npm`/`npx`/`corepack` in later steps resolve to that version, exactly like setup-node), **caches nub's store across runs by default**, and reads a standard `.npmrc` for registry auth. The Node version is resolved from the project's pin (`.node-version` / `.nvmrc` / `package.json`) by default, or from an explicit `node-version` input.
 
 Because the eager provision reads the project's pin files off disk, **`actions/checkout` must run before `setup-nub`.** With no inputs and no pin declared, the action provisions nothing and nub falls back to provisioning lazily at runtime — it never fails on a missing pin.
 
@@ -28,29 +28,32 @@ Because the eager provision reads the project's pin files off disk, **`actions/c
 # after
 - uses: nubjs/setup-nub@v0
   with:
-    node-version: 20          # pre-provisions Node 20 into nub's cache (warm-up hint)
+    node-version: 20          # provisions Node 20 and fronts it on the global PATH
     cache: npm                # accepted; caching is on by default regardless of value
     registry-url: https://registry.npmjs.org
 ```
 
 Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`/`bun`) keeps working but is no longer required to get a warm store. Disable with `package-manager-cache: false`.
 
-## How nub's Node provisioning differs from setup-node
+## Node on the global PATH
 
-`setup-node` exists to **put a Node toolchain on the runner**. nub does that itself, from the project's declared pin. So `node-version` here means something subtly different:
+Like `actions/setup-node`, setup-nub provisions a Node toolchain and **adds its bin dir to the global `PATH`**, so bare `node`/`npm`/`npx`/`corepack` in subsequent steps resolve to that version — a swap from `actions/setup-node@v4` to `nubjs/setup-nub@v0` leaves later steps that call bare `node`/`npm` behaving the same. The provisioned bin holds the real Node binaries (no nub-branded shim is fronted), and it is placed ahead of `nub`'s own bin so real `npm`/`npx` win.
 
-- With no inputs (the common case), setup-nub **eagerly provisions the project's own pinned Node** up front — it resolves the full pin chain (`devEngines.runtime` → `.node-version` → `.nvmrc` → `engines.node`) and installs the concrete version, so later steps don't pay a lazy download. If the project declares no pin, it skips gracefully (no error) and nub provisions lazily at runtime.
-- `node-version` and `node-version-file` are **warm-up hints**, not pins. They pre-provision that Node into nub's cache — but **nub still runs the project's declared Node at runtime.** If the input disagrees with the project's resolved pin, the action emits a warning and the project pin wins.
+Which version is fronted:
 
-This is the one place the drop-in semantics bend: setup-node's `node-version` overrides; setup-nub's pre-warms.
+- **With an explicit `node-version` / `node-version-file`** — that version is authoritative for the PATH (matching setup-node): it is provisioned and its bin dir is fronted. `nub` itself still runs the **project's** declared pin at invocation time; if the two differ, the action emits a warning.
+- **With no input (the common case)** — the project's own pinned Node is resolved (`devEngines.runtime` → `.node-version` → `.nvmrc` → `engines.node`), provisioned up front so later steps don't pay a lazy download, and its bin dir is fronted.
+- **No pin and no input** — nothing is provisioned and nothing is fronted (no error); the runner's preinstalled Node stays on PATH and nub provisions lazily at runtime.
+
+The remaining nuance vs setup-node: when an explicit `node-version` is set, it governs the **global PATH**, but `nub <script>` / `nub run` still execute the **project's** declared Node (nub's runtime is pin-authoritative). For most workflows these agree; the action warns when they don't.
 
 ## Inputs
 
 | Input | Default | Behavior |
 |---|---|---|
 | `nub-version` | `latest` | Version of nub to install — any npm semver range (`0.0.47`, `^0.0`, `latest`). |
-| `node-version` | — | Pre-provision this Node into nub's cache (warm-up hint, not a pin; warns on mismatch). |
-| `node-version-file` | — | Read a Node version from this file (`.node-version`, `.nvmrc`, `package.json`) and pre-provision it. |
+| `node-version` | — | Provision this Node and front its bin dir on the global PATH (authoritative for PATH, like setup-node). `nub` itself still runs the project pin at invocation; warns on mismatch. |
+| `node-version-file` | — | Read a Node version from this file (`.node-version`, `.nvmrc`, `package.json`), provision it, and front it on PATH. |
 | `cache` | auto | Explicitly enable/disable caching of nub's global store and provisioned Node toolchains. A **boolean**; a setup-node PM name (`npm`/`yarn`/`pnpm`/`bun`) is also accepted and treated as truthy. Leave **unset** to auto-enable when the project looks installable (mirrors setup-node). |
 | `package-manager-cache` | `true` | Set to `false` to disable the automatic caching. Mirrors setup-node's input of the same name. An explicit `cache` value still wins. |
 | `cache-dependency-path` | auto-detect | Lockfile path(s) whose hash keys the cache. Globs / newline-delimited lists. |
@@ -88,7 +91,7 @@ To **disable** caching, set `package-manager-cache: false` (or `cache: false`). 
 
 ## Registry auth
 
-`registry-url` writes a standard, neutral, temporary user-level `.npmrc` — byte-for-byte the setup-node authutil contract — into `$RUNNER_TEMP/.npmrc` and points npm config at it via `NPM_CONFIG_USERCONFIG`:
+`registry-url` writes a standard, neutral, temporary user-level `.npmrc` — functionally equivalent to the setup-node authutil contract (npm parses it identically; it is not byte-identical — setup-node merges into an existing user `.npmrc` and orders the `_authToken` line first) — into `$RUNNER_TEMP/.npmrc` and points npm config at it via `NPM_CONFIG_USERCONFIG`:
 
 ```ini
 @scope:registry=https://npm.pkg.github.com/

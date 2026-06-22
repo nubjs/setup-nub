@@ -16,10 +16,10 @@ inputs:
     required: false
     default: ""
   node-version:
-    description: "Pre-provision this Node version into nub's cache so the first run is warm. A warm-up HINT, not a pin — nub still runs the project's declared Node at runtime. Default: nub resolves and provisions the project pin lazily on first use."
+    description: "Provision this Node version and front its bin dir on the global PATH (authoritative for PATH, matching setup-node — bare node/npm/npx downstream are this version). nub itself still runs the project's declared Node at `nub`-invocation time; the action warns if the two differ. Default: resolve and front the project's own pin."
     required: false
   node-version-file:
-    description: "Read a Node version from this file (.node-version, .nvmrc, package.json) and pre-provision it. Redundant with nub's own resolution; an explicit warm-up alternative to node-version."
+    description: "Read a Node version from this file (.node-version, .nvmrc, package.json), provision it, and front it on the global PATH. An explicit alternative to node-version."
     required: false
   cache:
     description: "Cache nub's global store and provisioned Node toolchains across runs. A boolean (true/false); for setup-node drop-in compatibility a PM name (npm/yarn/pnpm/bun) is also accepted and treated as truthy. Leave UNSET to auto-enable when a lockfile or a package.json packageManager/devEngines field is present (mirrors setup-node). Set false to disable."
@@ -110,6 +110,18 @@ runs:
         installed="$(nub --version 2>/dev/null)"
         echo "Installed nub ${installed}"
         echo "nub-version=${installed}" >> "$GITHUB_OUTPUT"
+
+    # 1a. Register the same problem matchers setup-node ships (tsc + eslint-stylish
+    #     + eslint-compact) so tsc/eslint output in later steps surfaces as inline
+    #     annotations in the Checks UI. The matcher JSONs live beside this action;
+    #     GITHUB_ACTION_PATH resolves to the action's checkout dir on the runner.
+    - name: Register problem matchers
+      shell: bash
+      run: |
+        set -euo pipefail
+        for m in tsc eslint-stylish eslint-compact; do
+          echo "::add-matcher::${GITHUB_ACTION_PATH}/.github/${m}.json"
+        done
 
     # 1b. Decide whether caching is active, mirroring setup-node's model:
     #     caching is ON BY DEFAULT and auto-enables when the project looks
@@ -248,10 +260,13 @@ runs:
           nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(steps.cachekey.outputs.pin-glob) }}-
           nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-
 
-    # 5. Write a NEUTRAL project .npmrc for registry auth — byte-for-byte the
-    #    setup-node authutil contract (registry, <scope>:registry, _authToken
-    #    bound to NODE_AUTH_TOKEN, optional always-auth), then point npm config
-    #    at it via NPM_CONFIG_USERCONFIG. nub's PM reads this standard file.
+    # 5. Write a NEUTRAL project .npmrc for registry auth — functionally
+    #    equivalent to the setup-node authutil contract (registry, <scope>:registry,
+    #    _authToken bound to NODE_AUTH_TOKEN, optional always-auth), then point npm
+    #    config at it via NPM_CONFIG_USERCONFIG. nub's PM reads this standard file.
+    #    (Not byte-identical: setup-node merges into an existing user .npmrc and
+    #    orders _authToken before registry; this writes a fresh file. npm parses
+    #    both identically.)
     - name: Configure registry auth
       if: inputs.registry-url != ''
       shell: bash
@@ -260,6 +275,10 @@ runs:
         SCOPE: ${{ inputs.scope }}
         ALWAYS_AUTH: ${{ inputs.always-auth }}
         OWNER: ${{ github.repository_owner }}
+        # Surfaces a caller-provided NODE_AUTH_TOKEN into this step so it can be
+        # re-exported to later steps (mirrors setup-node). Absent unless the caller
+        # set it; never fabricated.
+        NODE_AUTH_TOKEN: ${{ env.NODE_AUTH_TOKEN }}
       run: |
         set -euo pipefail
         npmrc="${RUNNER_TEMP}/.npmrc"
@@ -294,6 +313,18 @@ runs:
           [ "$ALWAYS_AUTH" = "true" ] && echo "always-auth=true"
         } > "$npmrc"
         echo "NPM_CONFIG_USERCONFIG=${npmrc}" >> "$GITHUB_ENV"
+        # Re-export NODE_AUTH_TOKEN so it survives into later steps if the caller
+        # set it on THIS step's env (setup-node authutil.ts:49-51). Only when
+        # already present — never invents a token. Heredoc form so a token with
+        # special chars / newlines can't corrupt $GITHUB_ENV; mask it from logs.
+        if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+          echo "::add-mask::${NODE_AUTH_TOKEN}"
+          {
+            echo "NODE_AUTH_TOKEN<<NUBEOF"
+            printf '%s\n' "${NODE_AUTH_TOKEN}"
+            echo "NUBEOF"
+          } >> "$GITHUB_ENV"
+        fi
         echo "Wrote registry auth to ${npmrc}"
 
     # 6. Eagerly provision the project's Node so later steps are WARM. This runs
@@ -367,15 +398,88 @@ runs:
           fi
         fi
 
-        # The authoritative project pin nub will actually run (path on stdout; we
-        # read the version dir name after node/).
-        resolved="$(nub node which 2>/dev/null || true)"
-        # Normalize Windows backslash paths so the forward-slash extraction below
-        # works on every OS (no-op on POSIX paths).
+        # ---- Resolve the Node bin dir to front onto the GLOBAL PATH ----
+        # setup-node puts the specified Node's bin dir on PATH so bare
+        # node/npm/npx/corepack downstream are that version. We do the same with
+        # whatever nub ACTUALLY resolves, derived at runtime (never a hardcoded
+        # cache path — the layout is nub's to own and differs per OS).
+        #
+        # `nub node which` prints the resolved node binary on STDOUT and the
+        # resolution REASON on STDERR. The reason is the OS-independent signal for
+        # "did nub resolve a managed version?": "resolved from node on PATH" means
+        # nub fell back to the runner's host Node (nothing provisioned) — we must
+        # NOT front that (it is not the specified version, and fronting it is a
+        # redundant no-op at best). Any other reason (.node-version / .nvmrc /
+        # package.json / an explicit version) is a nub-managed Node we front.
+        #
+        # When an explicit node-version[-file] was given, it is AUTHORITATIVE for
+        # the PATH front (matching setup-node): we resolve from a throwaway pin dir
+        # holding exactly `want`, so PATH reflects the SPECIFIED version even if the
+        # project's own pin differs. With no explicit input we resolve the project
+        # pin from the (already cd'd) working directory. A single resolution is the
+        # source of truth for both the path AND the version output — no re-resolve.
+        why="${RUNNER_TEMP:-/tmp}/nub-why.$$"
+        pin_probe=""
+        if [ -n "$want" ]; then
+          pin_probe="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")" || pin_probe=""
+        fi
+        if [ -n "$pin_probe" ]; then
+          # Explicit version is authoritative for PATH: resolve from a throwaway
+          # pin dir holding exactly `want`, in a subshell so cwd is undisturbed.
+          printf '%s\n' "$want" > "$pin_probe/.node-version"
+          resolved="$( (cd "$pin_probe" && nub node which) 2>"$why" || true)"
+          reason="$(cat "$why" 2>/dev/null || true)"
+          rm -rf "$pin_probe" "$why"
+        else
+          # No explicit input (or temp-dir creation failed) — resolve the project
+          # pin from the already-cd'd working directory.
+          resolved="$(nub node which 2>"$why" || true)"
+          reason="$(cat "$why" 2>/dev/null || true)"
+          rm -f "$why"
+        fi
+        # Normalize Windows output: backslashes -> forward slashes, strip CR
+        # (CRLF stdout) so dirname / the sed extraction below work on every OS.
+        resolved="$(printf '%s' "$resolved" | tr -d '\r')"
         resolved="${resolved//\\//}"
-        # <cache>/node/<version>/... — the dir component after node/ is the version.
-        ver="$(echo "$resolved" | sed -n 's#.*/node/\([^/]*\)/.*#\1#p')"
-        if [ -n "$want" ] && [ -n "$ver" ] && [ "$ver" != "$want" ]; then
-          echo "::warning::node-version input (${want}) differs from the project's resolved pin (${ver}); nub runs the project pin."
+
+        # Did nub resolve a MANAGED Node (vs. fall back to the host Node on PATH)?
+        # The stderr reason is the OS-independent discriminator.
+        managed=false
+        if [ -n "$resolved" ] && ! printf '%s' "$reason" | grep -qi 'from node on PATH'; then
+          managed=true
+        fi
+
+        # The version dir name (the component after node/ in nub's cache layout) —
+        # used for the node-version output and the mismatch warning. Only meaningful
+        # for a managed Node; left empty on host fallback so the output reflects
+        # "nothing provisioned" (matching the documented contract) rather than
+        # leaking the runner's preinstalled host version.
+        ver=""
+        if [ "$managed" = "true" ]; then
+          ver="$(printf '%s' "$resolved" | sed -n 's#.*/node/\([^/]*\)/.*#\1#p')"
+        fi
+
+        # Front the resolved bin dir UNLESS nub fell back to the host Node on PATH.
+        # dirname of the resolved node binary is the bin dir on every OS by
+        # construction (POSIX: <root>/bin/node; Windows: <root>/node.exe -> <root>).
+        if [ "$managed" = "true" ]; then
+          which_dir="$(dirname "$resolved")"
+          echo "$which_dir" >> "$GITHUB_PATH"
+          echo "Fronting Node bin dir on PATH: $which_dir"
+        else
+          echo "No nub-managed Node resolved (host Node on PATH); not fronting a Node bin dir."
+        fi
+
+        # Surface the documented pin-vs-hint divergence: with an explicit input we
+        # front the SPECIFIED version (authoritative for PATH), but nub still runs
+        # the PROJECT pin at `nub`-invocation time, so they can differ. Compute the
+        # project pin separately only to warn (cheap; no effect on the PATH front).
+        if [ -n "$want" ]; then
+          proj="$(nub node which 2>/dev/null || true)"
+          proj="$(printf '%s' "$proj" | tr -d '\r')"; proj="${proj//\\//}"
+          proj_ver="$(printf '%s' "$proj" | sed -n 's#.*/node/\([^/]*\)/.*#\1#p')"
+          if [ -n "$proj_ver" ] && [ "$proj_ver" != "$ver" ]; then
+            echo "::warning::node-version input (${want}, on PATH) differs from the project's resolved pin (${proj_ver}); \`nub\` runs the project pin at invocation time."
+          fi
         fi
         echo "node-version=${ver}" >> "$GITHUB_OUTPUT"
