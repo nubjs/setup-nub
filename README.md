@@ -9,7 +9,7 @@ Install the [nub](https://github.com/nubjs/nub) CLI on a GitHub Actions runner. 
 - run: nub run build
 ```
 
-That's the whole story for most projects: setup-nub puts `nub` on PATH and **eagerly provisions the project's pinned Node** (resolved from `.node-version` / `.nvmrc` / `package.json`) so the first build step is warm instead of paying a Node download mid-build, and nub reads a standard `.npmrc` for registry auth.
+That's the whole story for most projects: setup-nub puts `nub` on PATH, **eagerly provisions the project's pinned Node** (resolved from `.node-version` / `.nvmrc` / `package.json`) so the first build step is warm instead of paying a Node download mid-build, **caches nub's store across runs by default**, and reads a standard `.npmrc` for registry auth.
 
 Because the eager provision reads the project's pin files off disk, **`actions/checkout` must run before `setup-nub`.** With no inputs and no pin declared, the action provisions nothing and nub falls back to provisioning lazily at runtime — it never fails on a missing pin.
 
@@ -29,9 +29,11 @@ Because the eager provision reads the project's pin files off disk, **`actions/c
 - uses: nubjs/setup-nub@v0
   with:
     node-version: 20          # pre-provisions Node 20 into nub's cache (warm-up hint)
-    cache: true               # boolean — nub has one store regardless of lockfile
+    cache: npm                # accepted; caching is on by default regardless of value
     registry-url: https://registry.npmjs.org
 ```
+
+Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`/`bun`) keeps working but is no longer required to get a warm store. Disable with `package-manager-cache: false`.
 
 ## How nub's Node provisioning differs from setup-node
 
@@ -49,8 +51,11 @@ This is the one place the drop-in semantics bend: setup-node's `node-version` ov
 | `nub-version` | `latest` | Version of nub to install — any npm semver range (`0.0.47`, `^0.0`, `latest`). |
 | `node-version` | — | Pre-provision this Node into nub's cache (warm-up hint, not a pin; warns on mismatch). |
 | `node-version-file` | — | Read a Node version from this file (`.node-version`, `.nvmrc`, `package.json`) and pre-provision it. |
-| `cache` | `false` | Cache nub's global store and provisioned Node toolchains across runs. A **boolean** — nub has one store regardless of package manager. For setup-node drop-in compatibility a PM name (`npm`/`yarn`/`pnpm`/`bun`) is also accepted and treated as truthy (any non-empty value that isn't `false` enables caching). |
+| `cache` | auto | Explicitly enable/disable caching of nub's global store and provisioned Node toolchains. A **boolean**; a setup-node PM name (`npm`/`yarn`/`pnpm`/`bun`) is also accepted and treated as truthy. Leave **unset** to auto-enable when the project looks installable (mirrors setup-node). |
+| `package-manager-cache` | `true` | Set to `false` to disable the automatic caching. Mirrors setup-node's input of the same name. An explicit `cache` value still wins. |
 | `cache-dependency-path` | auto-detect | Lockfile path(s) whose hash keys the cache. Globs / newline-delimited lists. |
+| `cache-key-prefix` | — | Prefix injected into the cache key, to scope or bust caches independently of the lockfile. |
+| `working-directory` | checkout root | Directory to resolve the project's Node pin and lockfile from. For monorepos where `package.json`/`.node-version` live in a subdirectory. |
 | `registry-url` | — | Registry to set up for auth. Writes a temporary user-level `.npmrc` (via `NPM_CONFIG_USERCONFIG`) and wires auth to `env.NODE_AUTH_TOKEN`. |
 | `scope` | repo owner | Scope for a scoped registry. Falls back to the repo owner for GitHub Packages. |
 | `always-auth` | `false` | Write `always-auth=true` into the `.npmrc`. |
@@ -66,17 +71,19 @@ Accepted for setup-node compatibility but **ignored** (never errors): `check-lat
 |---|---|
 | `nub-version` | The installed nub version (bare `v<semver>`). |
 | `node-version` | The Node version nub resolves for the project. Empty when nothing was provisioned. |
-| `cache-hit` | Whether nub's store cache was restored (only meaningful with `cache: true`). |
+| `cache-hit` | Whether nub's store cache was restored (only meaningful when caching is active). |
 
 ## Caching
 
-With `cache: true`, the action caches nub's durable, cross-run directories:
+**Caching is on by default**, mirroring `actions/setup-node`. It auto-enables when the project looks installable — a lockfile (`pnpm-lock.yaml`, `package-lock.json`, `bun.lock`/`bun.lockb`, `yarn.lock`) is present, or `package.json` declares a `packageManager` or `devEngines` field. The action caches nub's durable, cross-run directories:
 
 - the global content-addressed store (resolved from `nub store path` — the big win)
 - the provisioned Node toolchain dir (`<cache>/node`)
 - the PM packument cache (best-effort)
 
-The cache key is `nub-<os>-<arch>-<hash(lockfile)>` with a `restore-keys` ladder so a fresh lockfile still gets a warm store. `cache` defaults to `false` (opt-in).
+The cache key is `nub-<os>-<arch>-<prefix>-<hash(node-pin)>-<hash(lockfile)>` with a `restore-keys` ladder so a fresh lockfile still gets a warm store, and a Node-version bump invalidates the stale toolchain. `cache-key-prefix` injects the `<prefix>` segment for scoping or busting caches independently of the lockfile.
+
+To **disable** caching, set `package-manager-cache: false` (or `cache: false`). An explicit `cache` value always wins over the auto-detection.
 
 ## Registry auth
 

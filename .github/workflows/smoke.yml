@@ -169,6 +169,65 @@ jobs:
       # actions/cache won't re-restore. The cache is saved at job end; a re-run
       # of this workflow exercises the warm path. Informational here.
 
+  cache-default-on:
+    name: caching auto-enables by default on a lockfile project (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: lockfile fixture (no cache input)
+        shell: bash
+        # A lockfile at the checkout root with NO cache input must auto-enable
+        # caching, mirroring setup-node's default-on behavior.
+        run: |
+          echo '{"name":"d","private":true}' > package.json
+          echo '{}' > package-lock.json
+      - uses: ./
+        id: nub
+        # deliberately no `cache:` / `package-manager-cache:` input
+      - name: cache step ran (cache-hit output is a defined boolean)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ch="${{ steps.nub.outputs.cache-hit }}"
+          echo "cache-hit: '${ch}'"
+          # When caching is active the actions/cache step runs and emits true/false;
+          # when inactive the step is skipped and the output is empty.
+          case "$ch" in
+            true|false) echo "caching auto-enabled by default — OK" ;;
+            *) echo "::error::expected caching auto-enabled (cache-hit true/false), got '${ch}'"; exit 1 ;;
+          esac
+
+  cache-disable:
+    name: package-manager-cache=false disables caching (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: lockfile fixture (would auto-enable)
+        shell: bash
+        run: |
+          echo '{"name":"d","private":true}' > package.json
+          echo '{}' > package-lock.json
+      - uses: ./
+        id: nub
+        with:
+          package-manager-cache: "false"
+      - name: cache step skipped (cache-hit output empty)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ch="${{ steps.nub.outputs.cache-hit }}"
+          echo "cache-hit: '${ch}'"
+          [ -z "$ch" ] || { echo "::error::expected caching disabled (empty cache-hit), got '${ch}'"; exit 1; }
+          echo "caching disabled by package-manager-cache: false — OK"
+
   auth-npmrc:
     name: registry .npmrc shape (${{ matrix.os }})
     strategy:

@@ -22,11 +22,21 @@ inputs:
     description: "Read a Node version from this file (.node-version, .nvmrc, package.json) and pre-provision it. Redundant with nub's own resolution; an explicit warm-up alternative to node-version."
     required: false
   cache:
-    description: "Cache nub's global store and provisioned Node toolchains across runs (boolean). Default: false."
+    description: "Cache nub's global store and provisioned Node toolchains across runs. A boolean (true/false); for setup-node drop-in compatibility a PM name (npm/yarn/pnpm/bun) is also accepted and treated as truthy. Leave UNSET to auto-enable when a lockfile or a package.json packageManager/devEngines field is present (mirrors setup-node). Set false to disable."
     required: false
-    default: "false"
+    default: ""
+  package-manager-cache:
+    description: "Set to false to disable automatic caching. By default (true), caching is enabled when a lockfile or a package.json packageManager/devEngines field is present. Mirrors setup-node's input of the same name. An explicit cache value still wins."
+    required: false
+    default: "true"
   cache-dependency-path:
     description: "Lockfile path(s) whose hash keys the cache. Supports globs / newline-delimited lists. Default: auto-detect the project's lockfile."
+    required: false
+  cache-key-prefix:
+    description: "Prefix injected into the cache key (nub-<os>-<arch>-<prefix>-<hash>), letting you scope or bust caches independently of the lockfile. Default: none."
+    required: false
+  working-directory:
+    description: "Directory to resolve the project's Node pin and lockfile from. Default: the checkout root. Use for monorepos where package.json/.node-version live in a subdirectory."
     required: false
   registry-url:
     description: "Registry to set up for auth. Writes a temporary user-level .npmrc (via NPM_CONFIG_USERCONFIG; the neutral file nub's PM reads) and wires auth to env.NODE_AUTH_TOKEN."
@@ -64,7 +74,7 @@ outputs:
     description: "The Node version nub resolves for the project (nub node which). Empty when nothing was provisioned."
     value: ${{ steps.provision.outputs.node-version }}
   cache-hit:
-    description: "Whether nub's store cache was restored (only meaningful with cache: true)."
+    description: "Whether nub's store cache was restored (only meaningful when caching is active)."
     value: ${{ steps.cache.outputs.cache-hit }}
 
 runs:
@@ -98,28 +108,63 @@ runs:
         echo "Installed nub ${installed}"
         echo "nub-version=${installed}" >> "$GITHUB_OUTPUT"
 
-    # 1b. Normalize the `cache` input. setup-nub's `cache` is a BOOLEAN, but
-    #     setup-node's `cache` takes a PM name (npm/yarn/pnpm/bun). A mechanical
-    #     drop-in that leaves `cache: npm` in place would compare unequal to
-    #     'true' and silently disable caching. So treat any non-empty value that
-    #     isn't literally false as truthy, and note when a PM name was passed.
-    - name: Normalize cache input
+    # 1b. Decide whether caching is active, mirroring setup-node's model:
+    #     caching is ON BY DEFAULT and auto-enables when the project looks
+    #     installable (a lockfile, or a package.json packageManager/devEngines
+    #     field). The `cache` input is an explicit override; `package-manager-cache:
+    #     false` is the disable knob. Precedence:
+    #       1. explicit `cache` value  -> wins (false disables; any other value
+    #          enables; a PM name like `npm`/`pnpm` is accepted for setup-node
+    #          drop-in compat and treated as truthy — nub has one store regardless).
+    #       2. `package-manager-cache: false` -> disables.
+    #       3. otherwise -> AUTO: enable iff a lockfile or a
+    #          packageManager/devEngines signal is present.
+    - name: Resolve caching state
       id: cacheflag
       shell: bash
       env:
         CACHE_IN: ${{ inputs.cache }}
+        PMC_IN: ${{ inputs.package-manager-cache }}
+        WORKDIR: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
         raw="$CACHE_IN"
         lc="$(echo "$raw" | tr '[:upper:]' '[:lower:]')"
-        case "$lc" in
-          ""|false|"0"|no|off) enabled=false ;;
-          *)                    enabled=true  ;;
-        esac
-        case "$lc" in
-          npm|yarn|pnpm|bun)
-            echo "::notice::setup-nub's \`cache\` is a boolean (nub has one store regardless of package manager); the value \"${raw}\" enables caching." ;;
-        esac
+        pmc="$(echo "${PMC_IN:-true}" | tr '[:upper:]' '[:lower:]')"
+        dir="${WORKDIR:-.}"
+
+        if [ -n "$lc" ]; then
+          # 1. explicit `cache` value wins.
+          case "$lc" in
+            false|"0"|no|off) enabled=false ;;
+            *)                enabled=true  ;;
+          esac
+          case "$lc" in
+            npm|yarn|pnpm|bun)
+              echo "::notice::setup-nub's \`cache\` is a boolean (nub has one store regardless of package manager); the value \"${raw}\" enables caching." ;;
+          esac
+        elif [ "$pmc" = "false" ] || [ "$pmc" = "0" ] || [ "$pmc" = "no" ] || [ "$pmc" = "off" ]; then
+          # 2. caching explicitly disabled.
+          enabled=false
+        else
+          # 3. AUTO (mirrors setup-node default-on): enable when the project looks
+          #    installable. A lockfile is the strongest signal; otherwise a
+          #    package.json that declares a packageManager or devEngines also opts
+          #    in (setup-node enables when packageManager/devEngines is present).
+          enabled=false
+          for f in pnpm-lock.yaml package-lock.json bun.lock bun.lockb yarn.lock; do
+            [ -f "$dir/$f" ] && enabled=true && break
+          done
+          if [ "$enabled" = "false" ] && [ -f "$dir/package.json" ]; then
+            # require() treats a bare path as a module lookup, so pass an absolute
+            # path to read the package.json reliably for any working-directory.
+            pj="$(cd "$dir" && pwd)/package.json"
+            if node -e "const p=require(process.argv[1]);process.exit((p.packageManager||p.devEngines)?0:1)" "$pj" 2>/dev/null; then
+              enabled=true
+            fi
+          fi
+          [ "$enabled" = "true" ] && echo "Caching auto-enabled (lockfile or packageManager/devEngines present). Disable with package-manager-cache: false."
+        fi
         echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
 
     # 2. Resolve the cache paths from nub itself (never hardcode XDG layout).
@@ -142,26 +187,47 @@ runs:
         } >> "$GITHUB_OUTPUT"
 
     # 3. Compute the cache key from the lockfile (cache-dependency-path overrides
-    #    the auto-detected lockfile glob).
+    #    the auto-detected lockfile glob). The lockfile glob is resolved relative
+    #    to working-directory so monorepo subdirs are detected; cache-dependency-path
+    #    is honored verbatim (it may already be a repo-relative path / glob).
     - name: Compute cache key
       id: cachekey
       if: steps.cacheflag.outputs.enabled == 'true'
       shell: bash
       env:
         DEP_PATH: ${{ inputs.cache-dependency-path }}
+        WORKDIR: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
+        dir="${WORKDIR:-.}"
+        prefix=""
+        [ "$dir" != "." ] && prefix="${dir%/}/"
         if [ -n "$DEP_PATH" ]; then
           dep_glob="$DEP_PATH"
         else
-          # auto-detect: first present lockfile (pnpm > npm > bun > yarn)
+          # auto-detect: first present lockfile (pnpm > npm > bun > yarn) under
+          # the working directory. Emit a workspace-relative path so hashFiles()
+          # resolves it (hashFiles is rooted at GITHUB_WORKSPACE).
           dep_glob=""
           for f in pnpm-lock.yaml package-lock.json bun.lock bun.lockb yarn.lock; do
-            [ -f "$f" ] && dep_glob="$f" && break
+            [ -f "$dir/$f" ] && dep_glob="${prefix}${f}" && break
           done
-          dep_glob="${dep_glob:-package.json}"
+          dep_glob="${dep_glob:-${prefix}package.json}"
         fi
         echo "dep-glob=$dep_glob" >> "$GITHUB_OUTPUT"
+
+        # Fold the project's Node pin into the cache key so a Node-version bump
+        # invalidates the toolchain cache (setup-node#1171). We hash the pin SOURCE
+        # files rather than the installed version (provision runs later); any pin
+        # change busts the key, identical pins reuse it. Emitted as a newline-
+        # delimited glob list for hashFiles() (multiline GITHUB_OUTPUT value).
+        {
+          echo "pin-glob<<PINEOF"
+          for f in .node-version .nvmrc; do
+            [ -f "$dir/$f" ] && echo "${prefix}${f}"
+          done
+          echo "PINEOF"
+        } >> "$GITHUB_OUTPUT"
 
     # 4. Restore/save nub's store + Node toolchains. The restore-keys ladder gives
     #    a partial warm hit even on a fresh lockfile (huge over cold).
@@ -174,9 +240,10 @@ runs:
           ${{ steps.cachepaths.outputs.store }}
           ${{ steps.cachepaths.outputs.node-cache }}
           ${{ steps.cachepaths.outputs.pm-cache }}
-        key: nub-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(steps.cachekey.outputs.dep-glob) }}
+        key: nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(steps.cachekey.outputs.pin-glob) }}-${{ hashFiles(steps.cachekey.outputs.dep-glob) }}
         restore-keys: |
-          nub-${{ runner.os }}-${{ runner.arch }}-
+          nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(steps.cachekey.outputs.pin-glob) }}-
+          nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-
 
     # 5. Write a NEUTRAL project .npmrc for registry auth — byte-for-byte the
     #    setup-node authutil contract (registry, <scope>:registry, _authToken
@@ -245,8 +312,19 @@ runs:
       env:
         NODE_VERSION: ${{ inputs.node-version }}
         NODE_VERSION_FILE: ${{ inputs.node-version-file }}
+        WORKDIR: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
+
+        # Resolve the project pin from working-directory (monorepo subdir support).
+        # nub reads pin files from cwd, so cd there before provisioning.
+        if [ -n "${WORKDIR:-}" ]; then
+          if [ -d "$WORKDIR" ]; then
+            cd "$WORKDIR"
+          else
+            echo "::warning::working-directory '${WORKDIR}' does not exist; resolving the Node pin from the checkout root instead."
+          fi
+        fi
 
         # Soft checkout-first hint: with no pin files on disk, the repo probably
         # wasn't checked out yet. Don't fail — just nudge.
