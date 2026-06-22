@@ -74,8 +74,11 @@ outputs:
     description: "The Node version nub resolves for the project (nub node which). Empty when nothing was provisioned."
     value: ${{ steps.provision.outputs.node-version }}
   cache-hit:
-    description: "Whether nub's store cache was restored (only meaningful when caching is active)."
+    description: "Whether an exact nub-store cache match was restored. 'true' on an exact key hit, 'false' on a restore-keys partial hit, empty on a full miss (e.g. the first run) — mirrors actions/cache. Use caching-enabled to tell whether caching is active."
     value: ${{ steps.cache.outputs.cache-hit }}
+  caching-enabled:
+    description: "Whether caching is active for this run ('true'/'false'). Reflects the resolved cache/package-manager-cache/auto-detect decision, independent of whether a cache was hit."
+    value: ${{ steps.cacheflag.outputs.enabled }}
 
 runs:
   using: "composite"

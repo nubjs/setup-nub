@@ -188,18 +188,17 @@ jobs:
       - uses: ./
         id: nub
         # deliberately no `cache:` / `package-manager-cache:` input
-      - name: cache step ran (cache-hit output is a defined boolean)
+      - name: caching is active (caching-enabled output is true)
         shell: bash
         run: |
           set -euo pipefail
+          ce="${{ steps.nub.outputs.caching-enabled }}"
           ch="${{ steps.nub.outputs.cache-hit }}"
-          echo "cache-hit: '${ch}'"
-          # When caching is active the actions/cache step runs and emits true/false;
-          # when inactive the step is skipped and the output is empty.
-          case "$ch" in
-            true|false) echo "caching auto-enabled by default — OK" ;;
-            *) echo "::error::expected caching auto-enabled (cache-hit true/false), got '${ch}'"; exit 1 ;;
-          esac
+          echo "caching-enabled: '${ce}' / cache-hit: '${ch}'"
+          # cache-hit is empty on a first-run full miss even when caching is active
+          # (actions/cache semantics), so assert on caching-enabled instead.
+          [ "$ce" = "true" ] || { echo "::error::expected caching auto-enabled (caching-enabled=true), got '${ce}'"; exit 1; }
+          echo "caching auto-enabled by default — OK"
 
   cache-disable:
     name: package-manager-cache=false disables caching (${{ matrix.os }})
@@ -219,13 +218,13 @@ jobs:
         id: nub
         with:
           package-manager-cache: "false"
-      - name: cache step skipped (cache-hit output empty)
+      - name: caching is inactive (caching-enabled output is false)
         shell: bash
         run: |
           set -euo pipefail
-          ch="${{ steps.nub.outputs.cache-hit }}"
-          echo "cache-hit: '${ch}'"
-          [ -z "$ch" ] || { echo "::error::expected caching disabled (empty cache-hit), got '${ch}'"; exit 1; }
+          ce="${{ steps.nub.outputs.caching-enabled }}"
+          echo "caching-enabled: '${ce}'"
+          [ "$ce" = "false" ] || { echo "::error::expected caching disabled (caching-enabled=false), got '${ce}'"; exit 1; }
           echo "caching disabled by package-manager-cache: false — OK"
 
   auth-npmrc:

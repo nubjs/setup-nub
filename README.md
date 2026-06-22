@@ -71,7 +71,8 @@ Accepted for setup-node compatibility but **ignored** (never errors): `check-lat
 |---|---|
 | `nub-version` | The installed nub version (bare `v<semver>`). |
 | `node-version` | The Node version nub resolves for the project. Empty when nothing was provisioned. |
-| `cache-hit` | Whether nub's store cache was restored (only meaningful when caching is active). |
+| `cache-hit` | Whether an exact cache match was restored — `true` on an exact key hit, `false` on a `restore-keys` partial hit, empty on a full miss (e.g. the first run), mirroring `actions/cache`. |
+| `caching-enabled` | Whether caching is active for this run (`true`/`false`), reflecting the resolved `cache`/`package-manager-cache`/auto-detect decision — independent of whether a cache was hit. |
 
 ## Caching
 
