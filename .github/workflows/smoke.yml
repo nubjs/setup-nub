@@ -90,6 +90,56 @@ jobs:
           echo "node-version output: ${{ steps.nub.outputs.node-version }}"
           [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x"; exit 1; }
 
+  eager-provision:
+    name: eager provision (no input) installs the project pin (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: fixture pinned to 20 (no setup-nub input)
+        shell: bash
+        # The eager-provision step resolves the project's own pin off disk at the
+        # checkout root with NO node-version input — so the pin must live there.
+        run: echo "20" > .node-version
+      - uses: ./
+        id: nub
+      - name: pinned Node is provisioned + emitted as output
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub node ls
+          # Eager provision (no input) must have installed the project's pinned 20.x.
+          nub node ls | grep -E '(^|[^0-9])20\.' || { echo "::error::eager provision did not install the pinned Node 20.x"; exit 1; }
+          echo "node-version output: ${{ steps.nub.outputs.node-version }}"
+          [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x, got ${{ steps.nub.outputs.node-version }}"; exit 1; }
+
+  no-pin:
+    name: no project pin does not fail the action (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: fixture with NO Node pin
+        shell: bash
+        # A package.json at the checkout root with no engines/devEngines and no
+        # .node-version/.nvmrc: the eager provision must skip gracefully (emit a
+        # friendly note, exit 0), not fail the action.
+        run: echo '{"name":"nopin","private":true}' > package.json
+      - uses: ./
+        id: nub
+        # If the provision step errored on the no-pin case the job would fail here.
+      - name: action succeeded despite no pin
+        shell: bash
+        run: |
+          echo "no-pin setup succeeded"
+          echo "node-version output (expected empty): '${{ steps.nub.outputs.node-version }}'"
+
   cache:
     name: cache round-trip (${{ matrix.os }})
     strategy:
