@@ -249,7 +249,7 @@ runs:
     - name: Cache nub store
       id: cache
       if: steps.cacheflag.outputs.enabled == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ${{ steps.cachepaths.outputs.store }}
