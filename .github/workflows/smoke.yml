@@ -347,3 +347,40 @@ jobs:
           grep -q '@my-org:registry=https://reg.example.com/npm/' "$npmrc"
           # auth key keeps the full registry path, not just the host
           grep -q '//reg.example.com/npm/:_authToken=${NODE_AUTH_TOKEN}' "$npmrc"
+
+  range-and-shim:
+    name: semver range + shims (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup-nub (range, shim)
+        id: nub
+        uses: ./
+        with:
+          nub-version: "^0.8.0"
+          shim: true
+      - name: a range resolves to its highest release and the shims front PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${{ steps.nub.outputs.nub-version }}"
+          [[ "$out" =~ ^v0\.8\.[0-9]+ ]] || { echo "::error::expected a v0.8.x for ^0.8.0, got $out"; exit 1; }
+          npm_path="$(command -v npm)"
+          echo "npm resolves to: $npm_path"
+          [[ "$npm_path" == *shims* ]] || { echo "::error::npm does not resolve to the nub shim dir: $npm_path"; exit 1; }
+          # An unpinned checkout falls through to the runner's own npm.
+          npm --version
+      - name: a pinned project runs the pinned package manager through the shim
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/pinned" && mkdir -p "$d" && cd "$d"
+          printf '{ "name": "pinned", "private": true, "packageManager": "pnpm@10.15.1" }\n' > package.json
+          v="$(pnpm --version)"
+          echo "pnpm --version in a pnpm@10.15.1 project: $v"
+          [[ "$v" == "10.15.1" ]] || { echo "::error::expected the pinned pnpm 10.15.1, got $v"; exit 1; }

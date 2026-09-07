@@ -52,6 +52,10 @@ inputs:
     description: "Token for GitHub-API rate-limit relief when resolving nub's version range (and Node downloads on GHES). Defaults to github.token on github.com."
     required: false
     default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+  shim:
+    description: "Run `nub pm shim` after installing and put its directory first on PATH, so npm/npx/pnpm/pnpx/yarn/yarnpkg invocations in later steps run the package manager the project pins (packageManager / devEngines), provisioned on demand — corepack's job. An unpinned project falls through to the runner's own tool. Default: false."
+    required: false
+    default: "false"
   # Accepted-and-ignored for setup-node drop-in compatibility (never errors on a recognized input).
   check-latest:
     description: "Accepted for setup-node compatibility; ignored. nub's resolver already resolves the latest matching version on first run."
@@ -69,7 +73,7 @@ inputs:
 outputs:
   nub-version:
     description: "The installed nub version (nub --version, a bare v<semver>)."
-    value: ${{ steps.install.outputs.nub-version }}
+    value: ${{ steps.install.outputs.nub-version || steps.install-win.outputs.nub-version }}
   node-version:
     description: "The Node version nub resolves for the project (nub node which). Empty when nothing was provisioned."
     value: ${{ steps.provision.outputs.node-version }}
@@ -83,11 +87,14 @@ outputs:
 runs:
   using: "composite"
   steps:
-    # 1. Install nub globally via npm (preinstalled on every GitHub-hosted runner).
-    #    npm pulls the os/cpu-filtered @nubjs/nub-<platform> optional dep and links
-    #    the nub/nubx bins onto PATH; postinstall sets the execute bit.
-    - name: Install nub
-      id: install
+    # 1. Resolve the requested nub version to one release, then install that
+    #    release's per-platform archive into the runner tool cache with nub's own
+    #    installer (vendored under scripts/; sha256-verified against the release
+    #    sidecar). This replaces `npm install -g @nubjs/nub`, which spent 4–9 s per
+    #    job on ubuntu-latest where the archive install measures ~1 s. npm stays
+    #    as the fallback if the archive path fails, so an odd runner still works.
+    - name: Resolve nub version
+      id: resolve
       shell: bash
       env:
         NUB_VERSION: ${{ inputs.nub-version }}
@@ -104,12 +111,121 @@ runs:
             spec="$VERSION_ALIAS"
           fi
         fi
-        npm install -g "@nubjs/nub@${spec}"
+        spec="${spec#v}"
+        if [ "$spec" = latest ] || [ "$spec" = canary ]; then
+          # The installer resolves these itself (releases/latest, or the rolling canary tag).
+          resolved="$spec"
+        elif [[ "$spec" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          resolved="$spec"
+        else
+          # A semver range or dist-tag: ask the npm registry which versions match
+          # (metadata only, no install) and take the highest. npm ships on every
+          # hosted runner; a self-hosted runner without it passes an exact version.
+          if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+            echo "::error::Resolving the nub-version range '${spec}' needs npm and node on PATH; this runner has neither. Pass an exact version (for example 0.8.3) or 'latest'."
+            exit 1
+          fi
+          resolved="$(npm view "@nubjs/nub@${spec}" version --json 2>/dev/null | node -e '
+            let d = ""; process.stdin.on("data", c => d += c).on("end", () => {
+              let v = JSON.parse(d || "null"); if (!Array.isArray(v)) v = v ? [v] : [];
+              const key = s => s.split(/[.-]/).map(x => /^\d+$/.test(x) ? +x : x);
+              v.sort((x, y) => { const A = key(x), B = key(y);
+                for (let i = 0; i < Math.max(A.length, B.length); i++) {
+                  if (A[i] === B[i]) continue;
+                  if (A[i] === undefined) return typeof B[i] === "string" ? 1 : -1;
+                  if (B[i] === undefined) return typeof A[i] === "string" ? -1 : 1;
+                  if (typeof A[i] !== typeof B[i]) return typeof A[i] === "number" ? -1 : 1;
+                  return A[i] < B[i] ? -1 : 1; }
+                return 0; });
+              process.stdout.write(v[v.length - 1] || ""); });' || true)"
+          if [ -z "$resolved" ]; then
+            echo "::error::nub-version '${spec}' matches no published @nubjs/nub version (or the npm registry was unreachable); pass an exact version such as 0.8.3."
+            exit 1
+          fi
+        fi
+        echo "Resolved nub-version '${spec}' -> ${resolved}"
+        {
+          echo "spec=${spec}"
+          echo "version=${resolved}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Install nub
+      id: install
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        VERSION: ${{ steps.resolve.outputs.version }}
+        SPEC: ${{ steps.resolve.outputs.spec }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/nub/${VERSION}/${RUNNER_ARCH}"
+        # An exact version already in the tool cache (a persistent self-hosted
+        # runner) is reused as-is; latest/canary always re-resolve.
+        if [ -x "$root/bin/nub" ] && [ "$VERSION" != latest ] && [ "$VERSION" != canary ]; then
+          echo "nub ${VERSION} found in the tool cache at ${root}"
+        else
+          rm -rf "$root" && mkdir -p "$root"
+          if ! NUB_INSTALL_DIR="$root" NUB_NO_MODIFY_PATH=1 bash "${GITHUB_ACTION_PATH}/scripts/install.sh" "$VERSION"; then
+            echo "::warning::Installing nub ${VERSION} from its release archive failed; falling back to npm install -g."
+            rm -rf "$root"
+            root=""
+            npm install -g "@nubjs/nub@${SPEC}"
+          fi
+        fi
+        if [ -n "$root" ]; then
+          echo "${root}/bin" >> "$GITHUB_PATH"
+          export PATH="${root}/bin:${PATH}"
+        fi
         # nub --version prints a bare v<semver> on stdout; the resolved Node rides
         # on stderr, so 2>/dev/null keeps the captured value a clean version string.
         installed="$(nub --version 2>/dev/null)"
         echo "Installed nub ${installed}"
         echo "nub-version=${installed}" >> "$GITHUB_OUTPUT"
+
+    - name: Install nub (Windows)
+      id: install-win
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        VERSION: ${{ steps.resolve.outputs.version }}
+        SPEC: ${{ steps.resolve.outputs.spec }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+        $root = Join-Path $cacheRoot "nub\$env:VERSION\$env:RUNNER_ARCH"
+        $exe = Join-Path $root "bin\nub.exe"
+        $ok = $false
+        if ((Test-Path $exe) -and $env:VERSION -ne "latest" -and $env:VERSION -ne "canary") {
+          Write-Host "nub $env:VERSION found in the tool cache at $root"
+          $ok = $true
+        } else {
+          try {
+            if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            $env:NUB_INSTALL_DIR = $root
+            $env:NUB_NO_MODIFY_PATH = "1"
+            & "$env:GITHUB_ACTION_PATH\scripts\install.ps1" $env:VERSION
+            if ($LASTEXITCODE -ne 0) { throw "installer exited $LASTEXITCODE" }
+            $ok = Test-Path $exe
+          } catch {
+            Write-Host "::warning::Installing nub $env:VERSION from its release archive failed ($_); falling back to npm install -g."
+            $ok = $false
+          }
+        }
+        if ($ok) {
+          $bin = Join-Path $root "bin"
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          $env:PATH = "$bin;$env:PATH"
+        } else {
+          if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+          npm install -g "@nubjs/nub@$env:SPEC"
+          if ($LASTEXITCODE -ne 0) { throw "npm install -g exited $LASTEXITCODE" }
+        }
+        $installed = (& nub --version 2>$null | Select-Object -First 1)
+        Write-Host "Installed nub $installed"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "nub-version=$installed"
 
     # 1a. Register the same problem matchers setup-node ships (tsc + eslint-stylish
     #     + eslint-compact) so tsc/eslint output in later steps surfaces as inline
@@ -483,3 +599,32 @@ runs:
           fi
         fi
         echo "node-version=${ver}" >> "$GITHUB_OUTPUT"
+
+    # 7. Package-manager shims (opt-in). `nub pm shim` hardlinks npm/npx/pnpm/
+    #    pnpx/yarn/yarnpkg entries at the nub binary; each runs the package manager
+    #    the project pins, provisioned on demand, and falls through to the runner's
+    #    own tool when nothing is pinned. Added to PATH last so the shim dir fronts
+    #    the Node bin dir the previous step exported — otherwise Node's bundled npm
+    #    would shadow the shim.
+    - name: Link package-manager shims
+      if: inputs.shim == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="$(nub pm shim)"
+        printf '%s\n' "$out"
+        dir="$(printf '%s\n' "$out" | sed -n 's/^[0-9][0-9]* entries in \(.*\) (.*$/\1/p' | head -n1)"
+        if [ -z "$dir" ]; then
+          # Mirror nub's own resolution: XDG_DATA_HOME first on every OS, then
+          # LOCALAPPDATA on Windows, then ~/.local/share.
+          if [ -n "${XDG_DATA_HOME:-}" ]; then
+            dir="${XDG_DATA_HOME}/nub/shims"
+          elif [ "$RUNNER_OS" = Windows ] && [ -n "${LOCALAPPDATA:-}" ]; then
+            dir="${LOCALAPPDATA}/nub/shims"
+          else
+            dir="$HOME/.local/share/nub/shims"
+          fi
+        fi
+        [ -d "$dir" ] || { echo "::error::nub pm shim reported no shim directory (looked for ${dir})"; exit 1; }
+        echo "$dir" >> "$GITHUB_PATH"
+        echo "Shims on PATH from ${dir}"

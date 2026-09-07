@@ -11,6 +11,8 @@ Install the [nub](https://github.com/nubjs/nub) CLI on a GitHub Actions runner. 
 
 That's the whole story for most projects: setup-nub puts `nub` on PATH, **provisions the right Node and fronts its bin dir on the global PATH** (so bare `node`/`npm`/`npx`/`corepack` in later steps resolve to that version, exactly like setup-node), **caches nub's store across runs by default**, and reads a standard `.npmrc` for registry auth. The Node version is resolved from the project's pin (`.node-version` / `.nvmrc` / `package.json`) by default, or from an explicit `node-version` input.
 
+The action installs `nub` from the release archive for the runner's platform, verified against the release's sha256 sidecar by Nub's own installer, into the runner tool cache. That takes about one second on a hosted runner. If the archive path fails, it falls back to `npm install -g @nubjs/nub`.
+
 Because the eager provision reads the project's pin files off disk, **`actions/checkout` must run before `setup-nub`.** With no inputs and no pin declared, the action provisions nothing and nub falls back to provisioning lazily at runtime — it never fails on a missing pin.
 
 ## Drop-in from setup-node
@@ -63,10 +65,22 @@ The remaining nuance vs setup-node: when an explicit `node-version` is set, it g
 | `scope` | repo owner | Scope for a scoped registry. Falls back to the repo owner for GitHub Packages. |
 | `always-auth` | `false` | Write `always-auth=true` into the `.npmrc`. |
 | `token` | `github.token` | GitHub-API rate-limit relief when resolving nub's version range. |
+| `shim` | `false` | Run `nub pm shim` after installing and put its directory first on PATH: `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` in later steps run the package manager the project pins, provisioned on demand. |
 
 Accepted for setup-node compatibility but **ignored** (never errors): `check-latest`, `architecture`, `mirror`, `mirror-token`.
 
 > The `version` input is a **deprecated** alias for `nub-version`, kept for one minor. It emits a warning; use `nub-version`.
+
+## Package-manager shims
+
+With `shim: true`, the action runs `nub pm shim` and puts the shim directory first on PATH. In a project that pins a package manager (`packageManager` or `devEngines.packageManager`), `npm`, `pnpm`, and `yarn` in later steps run that pinned version, provisioned on demand, the same job corepack does. In an unpinned project they fall through to the runner's own tool. The shims do not route those commands into Nub's own installer; use `nub install` for that.
+
+```yaml
+- uses: nubjs/setup-nub@v0
+  with:
+    shim: true
+- run: pnpm install --frozen-lockfile   # the version package.json#packageManager pins
+```
 
 ## Outputs
 
