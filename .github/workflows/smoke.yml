@@ -384,3 +384,47 @@ jobs:
           v="$(pnpm --version)"
           echo "pnpm --version in a pnpm@10.15.1 project: $v"
           [[ "$v" == "10.15.1" ]] || { echo "::error::expected the pinned pnpm 10.15.1, got $v"; exit 1; }
+
+  additive:
+    name: beside setup-node — nub install from package-lock.json (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: ./
+        with:
+          node-version: "20"
+      - name: nub installs the npm lockfile; bare node and npm stay 20.x for later steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/additive" && mkdir -p "$d/local-dep" && cd "$d"
+          cat > package.json <<'PKG'
+          { "name": "additive", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
+            "scripts": { "hello": "node -e \"console.log(42)\"" } }
+          PKG
+          printf '{ "name": "local-dep", "version": "1.0.0" }\n' > local-dep/package.json
+          cat > package-lock.json <<'LOCK'
+          {
+            "name": "additive", "version": "1.0.0", "lockfileVersion": 3, "requires": true,
+            "packages": {
+              "": { "name": "additive", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" } },
+              "local-dep": { "version": "1.0.0" },
+              "node_modules/local-dep": { "resolved": "local-dep", "link": true }
+            }
+          }
+          LOCK
+          nub install --frozen-lockfile
+          [ -f node_modules/.nub-engine ] || { echo "::error::nub install did not run on Nub's engine"; exit 1; }
+          [ -e node_modules/local-dep ] || { echo "::error::the file: dependency is not linked"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected 20.x"; exit 1; }
+          out="$(npm run --silent hello)"
+          [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
+          echo "additive OK: nub installed package-lock.json, node $nv, npm run works"

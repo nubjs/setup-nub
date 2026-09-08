@@ -37,6 +37,23 @@ Because the eager provision reads the project's pin files off disk, **`actions/c
 
 Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`/`bun`) keeps working but is no longer required to get a warm store. Disable with `package-manager-cache: false`.
 
+## Beside setup-node
+
+`setup-nub` also runs after `actions/setup-node` in a workflow that keeps it. The install line is what changes:
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: 22
+- uses: nubjs/setup-nub@v0
+  with:
+    node-version: 22          # the same version: setup-nub fronts a Node on PATH too
+- run: nub install --frozen-lockfile   # was: npm ci
+- run: npm test                        # the real npm, as before
+```
+
+`nub install --frozen-lockfile` reads the existing `package-lock.json` (or `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) unchanged. Pass setup-node's `node-version` to setup-nub as well: both actions front a Node, and without the input setup-nub fronts the project's own pin, which a matrix job does not want. Drop `cache: npm` from setup-node — it restores npm's tarball cache, which Nub does not read, and setup-nub caches Nub's store by default.
+
 ## Node on the global PATH
 
 Like `actions/setup-node`, setup-nub provisions a Node toolchain and **adds its bin dir to the global `PATH`**, so bare `node`/`npm`/`npx`/`corepack` in subsequent steps resolve to that version — a swap from `actions/setup-node@v4` to `nubjs/setup-nub@v0` leaves later steps that call bare `node`/`npm` behaving the same. The provisioned bin holds the real Node binaries (no nub-branded shim is fronted), and it is placed ahead of `nub`'s own bin so real `npm`/`npx` win.
