@@ -385,6 +385,26 @@ jobs:
           echo "pnpm --version in a pnpm@10.15.1 project: $v"
           [[ "$v" == "10.15.1" ]] || { echo "::error::expected the pinned pnpm 10.15.1, got $v"; exit 1; }
 
+  multi-dep-path:
+    name: newline-delimited cache-dependency-path keys the cache (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          printf '{ "name": "multi", "version": "1.0.0" }\n' > package.json
+          echo "${{ github.run_id }}" > run.txt
+      - uses: ./
+        id: setup
+        with:
+          cache: true
+          cache-dependency-path: |
+            package.json
+            run.txt
+      - run: |
+          set -euo pipefail
+          [ "${{ steps.setup.outputs.caching-enabled }}" = "true" ] || { echo "::error::caching-enabled is '${{ steps.setup.outputs.caching-enabled }}'"; exit 1; }
+          echo "OK: a two-line cache-dependency-path reached the cache step"
+
   additive:
     name: beside setup-node — nub install from package-lock.json (${{ matrix.os }})
     strategy:

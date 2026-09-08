@@ -345,7 +345,12 @@ runs:
           done
           dep_glob="${dep_glob:-${prefix}package.json}"
         fi
-        echo "dep-glob=$dep_glob" >> "$GITHUB_OUTPUT"
+        # A newline-delimited list needs the heredoc form, as pin-glob below.
+        {
+          echo "dep-glob<<DEPEOF"
+          printf '%s\n' "$dep_glob"
+          echo "DEPEOF"
+        } >> "$GITHUB_OUTPUT"
 
         # Fold the project's Node pin into the cache key so a Node-version bump
         # invalidates the toolchain cache (setup-node#1171). We hash the pin SOURCE
