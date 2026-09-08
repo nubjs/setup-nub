@@ -397,9 +397,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      # A pin that disagrees with setup-node: with provision-node left on, the
+      # action would front Node 22 over setup-node's 20 and the check below fails.
+      - run: echo 22 > .nvmrc
+        shell: bash
       - uses: ./
         with:
-          node-version: "20"
+          provision-node: false
       - name: nub installs the npm lockfile; bare node and npm stay 20.x for later steps
         shell: bash
         run: |

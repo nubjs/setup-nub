@@ -52,6 +52,10 @@ inputs:
     description: "Token for GitHub-API rate-limit relief when resolving nub's version range (and Node downloads on GHES). Defaults to github.token on github.com."
     required: false
     default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+  provision-node:
+    description: "Set to false to leave Node alone: no eager provision, nothing fronted on PATH, and the node-version output empty. For a job where actions/setup-node has already put the wanted Node on PATH. nub still resolves the project's pin at its own invocation. Default: true."
+    required: false
+    default: "true"
   shim:
     description: "Run `nub pm shim` after installing and put its directory first on PATH, so npm/npx/pnpm/pnpx/yarn/yarnpkg invocations in later steps run the package manager the project pins (packageManager / devEngines), provisioned on demand — corepack's job. An unpinned project falls through to the runner's own tool. Default: false."
     required: false
@@ -270,10 +274,6 @@ runs:
             false|"0"|no|off) enabled=false ;;
             *)                enabled=true  ;;
           esac
-          case "$lc" in
-            npm|yarn|pnpm|bun)
-              echo "::notice::setup-nub's \`cache\` is a boolean (nub has one store regardless of package manager); the value \"${raw}\" enables caching." ;;
-          esac
         elif [ "$pmc" = "false" ] || [ "$pmc" = "0" ] || [ "$pmc" = "no" ] || [ "$pmc" = "off" ]; then
           # 2. caching explicitly disabled.
           enabled=false
@@ -458,6 +458,7 @@ runs:
     #    MUST run before setup-nub.
     - name: Provision Node
       id: provision
+      if: inputs.provision-node != 'false'
       shell: bash
       env:
         NODE_VERSION: ${{ inputs.node-version }}

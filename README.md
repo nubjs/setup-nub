@@ -47,12 +47,12 @@ Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`
     node-version: 22
 - uses: nubjs/setup-nub@v0
   with:
-    node-version: 22          # the same version: setup-nub fronts a Node on PATH too
+    provision-node: false     # setup-node's Node stays on PATH
 - run: nub install --frozen-lockfile   # was: npm ci
 - run: npm test                        # the real npm, as before
 ```
 
-`nub install --frozen-lockfile` reads the existing `package-lock.json` (or `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) unchanged. Pass setup-node's `node-version` to setup-nub as well: both actions front a Node, and without the input setup-nub fronts the project's own pin, which a matrix job does not want. Drop `cache: npm` from setup-node — it restores npm's tarball cache, which Nub does not read, and setup-nub caches Nub's store by default.
+`nub install --frozen-lockfile` reads the existing `package-lock.json` (or `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) unchanged. `provision-node: false` leaves the Node that setup-node put on PATH in place; without it setup-nub fronts the project's own pin, which a matrix job does not want. Drop `cache: npm` from setup-node — it restores npm's tarball cache, which Nub does not read, and setup-nub caches Nub's store by default. [`nubjs/setup-node`](https://github.com/nubjs/setup-node) packages these two steps as one action with setup-node's inputs, so the swap is the `uses:` line alone.
 
 ## Node on the global PATH
 
@@ -82,6 +82,7 @@ The remaining nuance vs setup-node: when an explicit `node-version` is set, it g
 | `scope` | repo owner | Scope for a scoped registry. Falls back to the repo owner for GitHub Packages. |
 | `always-auth` | `false` | Write `always-auth=true` into the `.npmrc`. |
 | `token` | `github.token` | GitHub-API rate-limit relief when resolving nub's version range. |
+| `provision-node` | `true` | Set to `false` to leave Node alone: no eager provision, nothing fronted on PATH, `node-version` output empty. For a job where `actions/setup-node` already put the wanted Node on PATH; `nub` still resolves the project's pin at its own invocation. |
 | `shim` | `false` | Run `nub pm shim` after installing and put its directory first on PATH: `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` in later steps run the package manager the project pins, provisioned on demand. |
 
 Accepted for setup-node compatibility but **ignored** (never errors): `check-latest`, `architecture`, `mirror`, `mirror-token`.
