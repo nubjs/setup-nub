@@ -52,7 +52,7 @@ Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`
 - run: npm test                        # the real npm, as before
 ```
 
-`nub install --frozen-lockfile` reads the existing `package-lock.json` (or `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) unchanged. `provision-node: false` leaves the Node that setup-node put on PATH in place; without it setup-nub fronts the project's own pin, which a matrix job does not want. Drop `cache: npm` from setup-node — it restores npm's tarball cache, which Nub does not read, and setup-nub caches Nub's store by default. [`nubjs/setup-node`](https://github.com/nubjs/setup-node) packages these two steps as one action with setup-node's inputs, so the swap is the `uses:` line alone.
+`nub install --frozen-lockfile` reads the existing `package-lock.json` (or `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) unchanged. `provision-node: false` leaves the Node that setup-node put on PATH in place; without it setup-nub fronts the project's own pin, which a matrix job does not want. Drop `cache: npm` from setup-node — it restores npm's tarball cache, which Nub does not read, and setup-nub caches Nub's store by default.
 
 ## Node on the global PATH
 
