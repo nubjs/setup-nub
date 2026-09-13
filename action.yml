@@ -449,7 +449,10 @@ runs:
         echo "Wrote registry auth to ${npmrc}"
 
     # 6. Eagerly provision the project's Node so later steps are WARM. This runs
-    #    UNCONDITIONALLY — the common (no-input) case is the whole point: a bare
+    #    by default; provision-node: false is the opt-out, for a job where
+    #    actions/setup-node already put the wanted Node on PATH (then nothing is
+    #    provisioned, nothing fronted, and the node-version output is empty).
+    #    The common (no-input) case is the whole point: a bare
     #    `nub node install` resolves the full pin chain (devEngines.runtime ->
     #    .node-version -> .nvmrc -> engines.node), resolves ranges against the
     #    live Node index, and installs the concrete version up front, instead of

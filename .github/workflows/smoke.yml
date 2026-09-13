@@ -422,12 +422,15 @@ jobs:
       - run: echo 22 > .nvmrc
         shell: bash
       - uses: ./
+        id: nub
         with:
           provision-node: false
       - name: nub installs the npm lockfile; bare node and npm stay 20.x for later steps
         shell: bash
         run: |
           set -euo pipefail
+          # provision-node: false leaves the node-version output empty.
+          [ -z "${{ steps.nub.outputs.node-version }}" ] || { echo "::error::node-version output is '${{ steps.nub.outputs.node-version }}' with provision-node: false, expected empty"; exit 1; }
           d="$RUNNER_TEMP/additive" && mkdir -p "$d/local-dep" && cd "$d"
           cat > package.json <<'PKG'
           { "name": "additive", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
