@@ -37,6 +37,23 @@ Because the eager provision reads the project's pin files off disk, **`actions/c
 
 Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`/`bun`) keeps working but is no longer required to get a warm store. Disable with `package-manager-cache: false`.
 
+## Beside setup-node
+
+`setup-nub` also runs after `actions/setup-node` in a workflow that keeps it. The install line is what changes:
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: 22
+- uses: nubjs/setup-nub@v0
+  with:
+    provision-node: false     # setup-node's Node stays on PATH
+- run: nub install --frozen-lockfile   # was: npm ci
+- run: npm test                        # the real npm, as before
+```
+
+`nub install --frozen-lockfile` reads the existing `package-lock.json` (or `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) unchanged. `provision-node: false` leaves the Node that setup-node put on PATH in place; without it setup-nub fronts the project's own pin, which a matrix job does not want. Drop `cache: npm` from setup-node — it restores npm's tarball cache, which Nub does not read, and setup-nub caches Nub's store by default.
+
 ## Node on the global PATH
 
 Like `actions/setup-node`, setup-nub provisions a Node toolchain and **adds its bin dir to the global `PATH`**, so bare `node`/`npm`/`npx`/`corepack` in subsequent steps resolve to that version — a swap from `actions/setup-node@v4` to `nubjs/setup-nub@v0` leaves later steps that call bare `node`/`npm` behaving the same. The provisioned bin holds the real Node binaries (no nub-branded shim is fronted), and it is placed ahead of `nub`'s own bin so real `npm`/`npx` win.
@@ -65,6 +82,7 @@ The remaining nuance vs setup-node: when an explicit `node-version` is set, it g
 | `scope` | repo owner | Scope for a scoped registry. Falls back to the repo owner for GitHub Packages. |
 | `always-auth` | `false` | Write `always-auth=true` into the `.npmrc`. |
 | `token` | `github.token` | GitHub-API rate-limit relief when resolving nub's version range. |
+| `provision-node` | `true` | Set to `false` to leave Node alone: no eager provision, nothing fronted on PATH, `node-version` output empty. For a job where `actions/setup-node` already put the wanted Node on PATH; `nub` still resolves the project's pin at its own invocation. |
 | `shim` | `false` | Run `nub pm shim` after installing and put its directory first on PATH: `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` in later steps run the package manager the project pins, provisioned on demand. |
 
 Accepted for setup-node compatibility but **ignored** (never errors): `check-latest`, `architecture`, `mirror`, `mirror-token`.
