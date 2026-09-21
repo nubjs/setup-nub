@@ -16,10 +16,10 @@ inputs:
     required: false
     default: ""
   node-version:
-    description: "Provision this Node version and front its bin dir on the global PATH (authoritative for PATH, matching setup-node — bare node/npm/npx downstream are this version). nub itself still runs the project's declared Node at `nub`-invocation time; the action warns if the two differ. Default: resolve and front the project's own pin."
+    description: "Provision this Node version, front its bin dir on the global PATH (matching setup-node — bare node/npm/npx downstream are this version), and bind later nub invocations to the same binary via NODE_EXECUTABLE so they do not fall back to the project's pin. Default: resolve and front the project's own pin."
     required: false
   node-version-file:
-    description: "Read a Node version from this file (.node-version, .nvmrc, package.json), provision it, and front it on the global PATH. An explicit alternative to node-version."
+    description: "Read a Node version from this file (.node-version, .nvmrc, package.json), provision it, front it on the global PATH, and bind later nub invocations to it via NODE_EXECUTABLE. An explicit alternative to node-version."
     required: false
   cache:
     description: "Cache nub's global store and provisioned Node toolchains across runs. A boolean (true/false); for setup-node drop-in compatibility a PM name (npm/yarn/pnpm/bun) is also accepted and treated as truthy. Leave UNSET to auto-enable when a lockfile or a package.json packageManager/devEngines field is present (mirrors setup-node). Set false to disable."
@@ -79,7 +79,7 @@ outputs:
     description: "The installed nub version (nub --version, a bare v<semver>)."
     value: ${{ steps.install.outputs.nub-version || steps.install-win.outputs.nub-version }}
   node-version:
-    description: "The Node version nub resolves for the project (nub node which). Empty when nothing was provisioned."
+    description: "The Node version this action provisioned (the explicit node-version input, or the project's pin). Empty when nothing was provisioned."
     value: ${{ steps.provision.outputs.node-version }}
   cache-hit:
     description: "Whether an exact nub-store cache match was restored. 'true' on an exact key hit, 'false' on a restore-keys partial hit, empty on a full miss (e.g. the first run) — mirrors actions/cache. Use caching-enabled to tell whether caching is active."
@@ -457,10 +457,12 @@ runs:
     #    .node-version -> .nvmrc -> engines.node), resolves ranges against the
     #    live Node index, and installs the concrete version up front, instead of
     #    nub downloading it lazily mid-build. An explicit node-version /
-    #    node-version-file still wins as a warm-up override. A "no pin" project
-    #    is fine (skip gracefully); any other failure is a warning, not a fail —
-    #    nub provisions lazily at runtime as a fallback. The resolved pin is
-    #    emitted as the node-version output.
+    #    node-version-file is authoritative for both PATH and later nub
+    #    invocations (NODE_EXECUTABLE is exported so nub does not re-resolve
+    #    the project's pin). A "no pin" project is fine (skip gracefully); any
+    #    other failure is a warning, not a fail — nub provisions lazily at
+    #    runtime as a fallback. The resolved pin is emitted as the node-version
+    #    output.
     #
     #    NOTE: this reads the project's pin files off disk, so actions/checkout
     #    MUST run before setup-nub.
@@ -538,19 +540,24 @@ runs:
         # package.json / an explicit version) is a nub-managed Node we front.
         #
         # When an explicit node-version[-file] was given, it is AUTHORITATIVE for
-        # the PATH front (matching setup-node): we resolve from a throwaway pin dir
-        # holding exactly `want`, so PATH reflects the SPECIFIED version even if the
-        # project's own pin differs. With no explicit input we resolve the project
-        # pin from the (already cd'd) working directory. A single resolution is the
-        # source of truth for both the path AND the version output — no re-resolve.
+        # PATH and for later nub invocations (matching setup-node's "this version
+        # for the rest of the job"): we resolve from a throwaway pin dir holding
+        # exactly `want`, so PATH reflects the SPECIFIED version even if the
+        # project's own pin differs, then export NODE_EXECUTABLE so nub does not
+        # re-resolve that pin. With no explicit input we resolve the project pin
+        # from the (already cd'd) working directory. A single resolution is the
+        # source of truth for the path, the version output, and NODE_EXECUTABLE.
         why="${RUNNER_TEMP:-/tmp}/nub-why.$$"
         pin_probe=""
+        from_explicit=false
         if [ -n "$want" ]; then
           pin_probe="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")" || pin_probe=""
         fi
         if [ -n "$pin_probe" ]; then
-          # Explicit version is authoritative for PATH: resolve from a throwaway
-          # pin dir holding exactly `want`, in a subshell so cwd is undisturbed.
+          # Explicit version is authoritative for PATH and later nub: resolve
+          # from a throwaway pin dir holding exactly `want`, in a subshell so
+          # cwd is undisturbed.
+          from_explicit=true
           printf '%s\n' "$want" > "$pin_probe/.node-version"
           resolved="$( (cd "$pin_probe" && nub node which) 2>"$why" || true)"
           reason="$(cat "$why" 2>/dev/null || true)"
@@ -562,9 +569,11 @@ runs:
           reason="$(cat "$why" 2>/dev/null || true)"
           rm -f "$why"
         fi
-        # Normalize Windows output: backslashes -> forward slashes, strip CR
-        # (CRLF stdout) so dirname / the sed extraction below work on every OS.
+        # Normalize Windows output: strip CR (CRLF stdout). Keep the OS-native
+        # path for NODE_EXECUTABLE; slash-convert a copy so dirname / sed work
+        # on every OS (nub prints backslashes on Windows).
         resolved="$(printf '%s' "$resolved" | tr -d '\r')"
+        node_executable="$resolved"
         resolved="${resolved//\\//}"
 
         # Did nub resolve a MANAGED Node (vs. fall back to the host Node on PATH)?
@@ -575,10 +584,10 @@ runs:
         fi
 
         # The version dir name (the component after node/ in nub's cache layout) —
-        # used for the node-version output and the mismatch warning. Only meaningful
-        # for a managed Node; left empty on host fallback so the output reflects
-        # "nothing provisioned" (matching the documented contract) rather than
-        # leaking the runner's preinstalled host version.
+        # used for the node-version output. Only meaningful for a managed Node;
+        # left empty on host fallback so the output reflects "nothing provisioned"
+        # (matching the documented contract) rather than leaking the runner's
+        # preinstalled host version.
         ver=""
         if [ "$managed" = "true" ]; then
           ver="$(printf '%s' "$resolved" | sed -n 's#.*/node/\([^/]*\)/.*#\1#p')"
@@ -591,20 +600,32 @@ runs:
           which_dir="$(dirname "$resolved")"
           echo "$which_dir" >> "$GITHUB_PATH"
           echo "Fronting Node bin dir on PATH: $which_dir"
+        elif [ -n "$want" ]; then
+          # Explicit node-version[-file] requested, but the probe fell back to
+          # the host Node — the caller asked for a version we did not apply.
+          echo "::warning::node-version input (${want}) did not resolve to a nub-managed Node (host Node on PATH); nothing fronted and NODE_EXECUTABLE not set."
         else
           echo "No nub-managed Node resolved (host Node on PATH); not fronting a Node bin dir."
         fi
 
-        # Surface the documented pin-vs-hint divergence: with an explicit input we
-        # front the SPECIFIED version (authoritative for PATH), but nub still runs
-        # the PROJECT pin at `nub`-invocation time, so they can differ. Compute the
-        # project pin separately only to warn (cheap; no effect on the PATH front).
-        if [ -n "$want" ]; then
+        # An explicit node-version[-file] also binds later nub invocations: nub
+        # otherwise re-resolves the project's pin (.node-version / engines / …)
+        # even when PATH already fronts a different Node. NODE_EXECUTABLE is nub's
+        # per-job override and outranks pin files without rewriting them. Heredoc
+        # form so a Windows path with backslashes cannot corrupt $GITHUB_ENV.
+        # `managed = true` already implies a non-empty resolved path.
+        if [ "$from_explicit" = "true" ] && [ "$managed" = "true" ]; then
+          {
+            echo "NODE_EXECUTABLE<<NUBEOF"
+            printf '%s\n' "$node_executable"
+            echo "NUBEOF"
+          } >> "$GITHUB_ENV"
+          echo "Exporting NODE_EXECUTABLE=${node_executable} so later nub invocations use Node ${ver}"
           proj="$(nub node which 2>/dev/null || true)"
           proj="$(printf '%s' "$proj" | tr -d '\r')"; proj="${proj//\\//}"
           proj_ver="$(printf '%s' "$proj" | sed -n 's#.*/node/\([^/]*\)/.*#\1#p')"
           if [ -n "$proj_ver" ] && [ "$proj_ver" != "$ver" ]; then
-            echo "::warning::node-version input (${want}, on PATH) differs from the project's resolved pin (${proj_ver}); \`nub\` runs the project pin at invocation time."
+            echo "node-version input (${want}) differs from the project's resolved pin (${proj_ver}); later nub uses ${ver} via NODE_EXECUTABLE."
           fi
         fi
         echo "node-version=${ver}" >> "$GITHUB_OUTPUT"

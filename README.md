@@ -30,7 +30,7 @@ Because the eager provision reads the project's pin files off disk, **`actions/c
 # after
 - uses: nubjs/setup-nub@v0
   with:
-    node-version: 20          # provisions Node 20 and fronts it on the global PATH
+    node-version: 20          # PATH node and later `nub` both use 20
     cache: npm                # accepted; caching is on by default regardless of value
     registry-url: https://registry.npmjs.org
 ```
@@ -56,23 +56,21 @@ Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`
 
 ## Node on the global PATH
 
-Like `actions/setup-node`, setup-nub provisions a Node toolchain and **adds its bin dir to the global `PATH`**, so bare `node`/`npm`/`npx`/`corepack` in subsequent steps resolve to that version — a swap from `actions/setup-node@v4` to `nubjs/setup-nub@v0` leaves later steps that call bare `node`/`npm` behaving the same. The provisioned bin holds the real Node binaries (no nub-branded shim is fronted), and it is placed ahead of `nub`'s own bin so real `npm`/`npx` win.
+Like `actions/setup-node`, setup-nub provisions a Node toolchain and **adds its bin dir to the global `PATH`**, so bare `node`/`npm`/`npx`/`corepack` in subsequent steps resolve to that version — a swap from `actions/setup-node@v4` to `nubjs/setup-nub@v0` leaves later steps that call bare `node`/`npm` behaving the same. The provisioned bin holds the real Node binaries (no nub-branded shim is fronted), and it is placed ahead of `nub`'s own bin so real `npm`/`npx` win. An explicit `node-version` / `node-version-file` also exports `NODE_EXECUTABLE` so later `nub` / `nub run` use that same binary, instead of re-resolving the project's pin.
 
 Which version is fronted:
 
-- **With an explicit `node-version` / `node-version-file`** — that version is authoritative for the PATH (matching setup-node): it is provisioned and its bin dir is fronted. `nub` itself still runs the **project's** declared pin at invocation time; if the two differ, the action emits a warning.
-- **With no input (the common case)** — the project's own pinned Node is resolved (`devEngines.runtime` → `.node-version` → `.nvmrc` → `engines.node`), provisioned up front so later steps don't pay a lazy download, and its bin dir is fronted.
+- **With an explicit `node-version` / `node-version-file`** — that version is authoritative for the rest of the job (matching setup-node): it is provisioned, its bin dir is fronted on PATH, and `NODE_EXECUTABLE` is exported so later `nub` / `nub run` use the same binary without rewriting pin files on disk.
+- **With no input (the common case)** — the project's own pinned Node is resolved (`devEngines.runtime` → `.node-version` → `.nvmrc` → `engines.node`), provisioned up front so later steps don't pay a lazy download, and its bin dir is fronted. Later `nub` invocations keep following the project's pin.
 - **No pin and no input** — nothing is provisioned and nothing is fronted (no error); the runner's preinstalled Node stays on PATH and nub provisions lazily at runtime.
-
-The remaining nuance vs setup-node: when an explicit `node-version` is set, it governs the **global PATH**, but `nub <script>` / `nub run` still execute the **project's** declared Node (nub's runtime is pin-authoritative). For most workflows these agree; the action warns when they don't.
 
 ## Inputs
 
 | Input | Default | Behavior |
 |---|---|---|
 | `nub-version` | `latest` | Version of nub to install — any npm semver range (`0.0.47`, `^0.0`, `latest`). |
-| `node-version` | — | Provision this Node and front its bin dir on the global PATH (authoritative for PATH, like setup-node). `nub` itself still runs the project pin at invocation; warns on mismatch. |
-| `node-version-file` | — | Read a Node version from this file (`.node-version`, `.nvmrc`, `package.json`), provision it, and front it on PATH. |
+| `node-version` | — | Provision this Node, front its bin dir on the global PATH, and bind later `nub` invocations to it via `NODE_EXECUTABLE` (no pin-file rewrite). |
+| `node-version-file` | — | Read a Node version from this file (`.node-version`, `.nvmrc`, `package.json`), provision it, front it on PATH, and bind later `nub` invocations to it. |
 | `cache` | auto | Explicitly enable/disable caching of nub's global store and provisioned Node toolchains. A **boolean**; a setup-node PM name (`npm`/`yarn`/`pnpm`/`bun`) is also accepted and treated as truthy. Leave **unset** to auto-enable when the project looks installable (mirrors setup-node). |
 | `package-manager-cache` | `true` | Set to `false` to disable the automatic caching. Mirrors setup-node's input of the same name. An explicit `cache` value still wins. |
 | `cache-dependency-path` | auto-detect | Lockfile path(s) whose hash keys the cache. Globs / newline-delimited lists. |
@@ -91,7 +89,7 @@ Accepted for setup-node compatibility but **ignored** (never errors): `check-lat
 
 ## Package-manager shims
 
-With `shim: true`, the action runs `nub pm shim` and puts the shim directory first on PATH. In a project that pins a package manager (`packageManager` or `devEngines.packageManager`), `npm`, `pnpm`, and `yarn` in later steps run that pinned version, provisioned on demand, the same job corepack does. In an unpinned project they fall through to the runner's own tool. The shims do not route those commands into Nub's own installer; use `nub install` for that.
+With `shim: true`, the action runs `nub pm shim` and puts the shim directory first on PATH. In a project that pins a package manager (`packageManager` or `devEngines.packageManager`), `npm`, `pnpm`, and `yarn` in later steps run that pinned version, provisioned on demand, the same job corepack does. In an unpinned project they fall through to the runner's own tool. The shims do not route those commands into Nub's own installer; use `nub install` for that. An explicit `node-version` / `node-version-file` still applies: those later steps inherit `NODE_EXECUTABLE`, so a shimmed `pnpm`/`npm`/`yarn` runs on the requested Node.
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -105,7 +103,7 @@ With `shim: true`, the action runs `nub pm shim` and puts the shim directory fir
 | Output | Description |
 |---|---|
 | `nub-version` | The installed nub version (bare `v<semver>`). |
-| `node-version` | The Node version nub resolves for the project. Empty when nothing was provisioned. |
+| `node-version` | The Node version this action provisioned (the explicit input, or the project's pin). Empty when nothing was provisioned. |
 | `cache-hit` | Whether an exact cache match was restored — `true` on an exact key hit, `false` on a `restore-keys` partial hit, empty on a full miss (e.g. the first run), mirroring `actions/cache`. |
 | `caching-enabled` | Whether caching is active for this run (`true`/`false`), reflecting the resolved `cache`/`package-manager-cache`/auto-detect decision — independent of whether a cache was hit. |
 

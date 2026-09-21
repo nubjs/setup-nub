@@ -158,6 +158,61 @@ jobs:
           echo "node-version output: ${{ steps.nub.outputs.node-version }}"
           [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x"; exit 1; }
 
+  # Explicit node-version must bind later nub invocations, not only PATH node.
+  # A committed pin of 20 plus node-version: 22 is the matrix-job case: without
+  # NODE_EXECUTABLE, `nub` would still run 20.x from .node-version.
+  explicit-binds-nub:
+    name: explicit node-version binds later nub (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: fixture pinned to 20 (input will request 22)
+        shell: bash
+        # The provision step resolves the pin at the checkout root, where a
+        # consumer's pin lives — so the disagreeing .node-version must sit
+        # there too, not under a subdir.
+        run: |
+          echo "20" > .node-version
+          # scripts.ver exercises `nub run` (issue #12's repro). packageManager
+          # lets the same job assert a shimmed npm runs on the bound Node.
+          printf '{ "name": "explicit-binds", "private": true, "packageManager": "npm@10.9.2", "scripts": { "ver": "node -p process.versions.node" } }\n' > package.json
+      - uses: ./
+        with:
+          node-version: "22"
+          shim: true
+          # packageManager on the fixture would auto-enable caching; this job
+          # is only about the NODE_EXECUTABLE bind.
+          package-manager-cache: false
+      - name: later nub uses 22.x, not the committed 20 pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "NODE_EXECUTABLE=${NODE_EXECUTABLE:-<unset>}"
+          [ -n "${NODE_EXECUTABLE:-}" ] || { echo "::error::NODE_EXECUTABLE was not exported"; exit 1; }
+          printf 'console.log(process.versions.node)\n' > "$RUNNER_TEMP/nub-ver.js"
+          nv="$(nub "$RUNNER_TEMP/nub-ver.js" | tr -d '\r' | tail -n1)"
+          echo "nub ran Node $nv"
+          [[ "$nv" == 22.* ]] || { echo "::error::nub ran Node $nv, expected 22.x (explicit node-version); the .node-version pin is 20"; exit 1; }
+          run_nv="$(nub run ver | tr -d '\r' | tail -n1)"
+          echo "nub run ver: $run_nv"
+          [[ "$run_nv" == 22.* ]] || { echo "::error::nub run used Node $run_nv, expected 22.x"; exit 1; }
+          path_nv="$(node -p 'process.versions.node' | tr -d '\r')"
+          echo "PATH node: $path_nv"
+          [[ "$path_nv" == 22.* ]] || { echo "::error::PATH node is $path_nv, expected 22.x"; exit 1; }
+          npm_path="$(command -v npm)"
+          echo "npm resolves to: $npm_path"
+          [[ "$npm_path" == *shims* ]] || { echo "::error::npm is not the nub shim: $npm_path"; exit 1; }
+          # Shimmed npm reports the Node it is running on. If the shim ignored
+          # NODE_EXECUTABLE and read the pin files, this would be 20.x.
+          shim_nv="$(npm version --json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).node' | tr -d '\r')"
+          echo "shimmed npm runs on Node $shim_nv"
+          [[ "$shim_nv" == 22.* ]] || { echo "::error::shimmed npm runs on Node $shim_nv, expected 22.x"; exit 1; }
+          echo "explicit node-version binds later nub — OK"
+
   eager-provision:
     name: eager provision (no input) installs the project pin (${{ matrix.os }})
     strategy:
@@ -183,6 +238,8 @@ jobs:
           nub node ls | grep -E '(^|[^0-9])20\.' || { echo "::error::eager provision did not install the pinned Node 20.x"; exit 1; }
           echo "node-version output: ${{ steps.nub.outputs.node-version }}"
           [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x, got ${{ steps.nub.outputs.node-version }}"; exit 1; }
+          # No explicit node-version input → do not override the project pin.
+          [ -z "${NODE_EXECUTABLE:-}" ] || { echo "::error::NODE_EXECUTABLE is set without an explicit node-version: '${NODE_EXECUTABLE}'"; exit 1; }
 
   no-pin:
     name: no project pin does not fail the action (${{ matrix.os }})
@@ -431,6 +488,7 @@ jobs:
           set -euo pipefail
           # provision-node: false leaves the node-version output empty.
           [ -z "${{ steps.nub.outputs.node-version }}" ] || { echo "::error::node-version output is '${{ steps.nub.outputs.node-version }}' with provision-node: false, expected empty"; exit 1; }
+          [ -z "${NODE_EXECUTABLE:-}" ] || { echo "::error::NODE_EXECUTABLE is set with provision-node: false: '${NODE_EXECUTABLE}'"; exit 1; }
           d="$RUNNER_TEMP/additive" && mkdir -p "$d/local-dep" && cd "$d"
           cat > package.json <<'PKG'
           { "name": "additive", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
