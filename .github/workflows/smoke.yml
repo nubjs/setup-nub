@@ -92,7 +92,7 @@ jobs:
   # A runner image that preinstalls a Node satisfying the requested version
   # (ubuntu-26.04 ships 24.x in /usr/local/bin) must still get nub's cached Node
   # fronted. nub's resolver prefers a satisfying PATH Node, which once fronted
-  # the image's root-owned /usr/local/bin, where `npm install -g` hits EACCES.
+  # the image's /usr/local/bin, where `npm install -g npm` hits EACCES.
   # `exact` asks for the runner's own version, which `nub node install` would
   # otherwise skip as already on PATH.
   runner-node-satisfies:
@@ -120,7 +120,7 @@ jobs:
         with:
           node-version: ${{ steps.runner.outputs.want }}
           cache: false
-      - name: node and npm resolve into nub's cache; npm install -g works
+      - name: node and npm resolve into nub's cache; npm upgrades itself globally
         shell: bash
         env:
           WANT: ${{ steps.runner.outputs.want }}
@@ -134,10 +134,10 @@ jobs:
           [[ "$npm_path" == "$cache"* ]] || { echo "::error::npm resolves to $npm_path, not into $cache"; exit 1; }
           nv="$(node -p 'process.versions.node')"
           [[ "$nv" == "$WANT" || "$nv" == "$WANT".* ]] || { echo "::error::node is $nv, expected $WANT"; exit 1; }
-          npm install -g cowsay@1.6.0
-          cowsay_path="$(command -v cowsay)"
-          [[ "$cowsay_path" == "$(dirname "$node_path")/cowsay" ]] || { echo "::error::cowsay resolves to $cowsay_path, not beside the fronted node"; exit 1; }
-          cowsay ok
+          # npm's own upgrade writes man5 pages, which the image's root-owned
+          # /usr/local/share/man refuses; a package with only a bin would pass there.
+          npm install -g npm@11.21.1
+          [[ "$(command -v npm)" == "$npm_path" && "$(npm -v)" == 11.21.1 ]] || { echo "::error::npm after the global upgrade is $(command -v npm) $(npm -v)"; exit 1; }
 
   path-parity-control:
     name: setup-node control — bare node == 20.x (${{ matrix.os }})

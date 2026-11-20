@@ -56,7 +56,7 @@ Like setup-node, **caching is on by default** — `cache: npm` (or `yarn`/`pnpm`
 
 ## Node on the global PATH
 
-Like `actions/setup-node`, setup-nub provisions a Node toolchain and **adds its bin dir to the global `PATH`**, so bare `node`/`npm`/`npx`/`corepack` in subsequent steps resolve to that version — a swap from `actions/setup-node@v4` to `nubjs/setup-nub@v0` leaves later steps that call bare `node`/`npm` behaving the same. The provisioned bin holds the real Node binaries (no nub-branded shim is fronted), and it is placed ahead of `nub`'s own bin so real `npm`/`npx` win.
+Like `actions/setup-node`, setup-nub provisions a Node toolchain and **adds its bin dir to the global `PATH`**, so bare `node`/`npm`/`npx`/`corepack` in subsequent steps resolve to that version — a swap from `actions/setup-node@v4` to `nubjs/setup-nub@v0` leaves later steps that call bare `node`/`npm` behaving the same. The provisioned bin holds the real Node binaries (no nub-branded shim is fronted), and it is placed ahead of `nub`'s own bin so real `npm`/`npx` win. It is always nub's cached copy, even when the runner's preinstalled Node already satisfies the version, so `npm install -g` writes to a directory the job owns.
 
 Which version is fronted:
 

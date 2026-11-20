@@ -491,6 +491,23 @@ runs:
           echo "::warning::No package.json / .node-version / .nvmrc found in the working directory — did actions/checkout run before setup-nub? Eager Node provisioning needs the project's pin files on disk."
         fi
 
+        # nub's resolver takes a Node already on PATH whenever it satisfies the
+        # pin: `nub node install` skips a version PATH already has, and `nub node
+        # which` answers with the PATH binary. On a runner that preinstalls a
+        # matching Node (ubuntu-26.04 ships 24.x in /usr/local/bin) that fronted
+        # the image's root-owned Node, where `npm install -g` fails with EACCES.
+        # So every provisioning call runs on a PATH with each dir holding a
+        # `node` removed: nub can only install into, and answer from, its cache.
+        nub_bin="$(command -v nub)"
+        nodeless_path=""
+        IFS=':' read -ra path_dirs <<< "$PATH"
+        for d in "${path_dirs[@]}"; do
+          [ -n "$d" ] || continue
+          if [ -e "$d/node" ] || [ -e "$d/node.exe" ]; then continue; fi
+          nodeless_path="${nodeless_path:+$nodeless_path:}$d"
+        done
+        nub_cache() { PATH="$nodeless_path" "$nub_bin" "$@"; }
+
         want="$NODE_VERSION"
         if [ -z "$want" ] && [ -n "$NODE_VERSION_FILE" ] && [ -f "$NODE_VERSION_FILE" ]; then
           case "$NODE_VERSION_FILE" in
@@ -504,7 +521,7 @@ runs:
         if [ -n "$want" ]; then
           # Explicit warm-up override.
           echo "Provisioning Node ${want} into nub's cache"
-          nub node install "$want" || echo "::warning::nub node install ${want} failed; nub will provision lazily at runtime"
+          nub_cache node install "$want" || echo "::warning::nub node install ${want} failed; nub will provision lazily at runtime"
         else
           # Common case: resolve + install the project's own pin chain. A bare
           # `nub node install` exits non-zero with a "no Node pin" message when
@@ -512,7 +529,7 @@ runs:
           echo "Eagerly provisioning the project's pinned Node"
           out=""
           rc=0
-          out="$(nub node install 2>&1)" || rc=$?
+          out="$(nub_cache node install 2>&1)" || rc=$?
           [ -n "$out" ] && echo "$out"
           if [ "$rc" -ne 0 ]; then
             if printf '%s' "$out" | grep -qi 'no Node pin'; then
@@ -552,13 +569,13 @@ runs:
           # Explicit version is authoritative for PATH: resolve from a throwaway
           # pin dir holding exactly `want`, in a subshell so cwd is undisturbed.
           printf '%s\n' "$want" > "$pin_probe/.node-version"
-          resolved="$( (cd "$pin_probe" && nub node which) 2>"$why" || true)"
+          resolved="$( (cd "$pin_probe" && nub_cache node which) 2>"$why" || true)"
           reason="$(cat "$why" 2>/dev/null || true)"
           rm -rf "$pin_probe" "$why"
         else
           # No explicit input (or temp-dir creation failed) — resolve the project
           # pin from the already-cd'd working directory.
-          resolved="$(nub node which 2>"$why" || true)"
+          resolved="$(nub_cache node which 2>"$why" || true)"
           reason="$(cat "$why" 2>/dev/null || true)"
           rm -f "$why"
         fi
@@ -592,7 +609,7 @@ runs:
           echo "$which_dir" >> "$GITHUB_PATH"
           echo "Fronting Node bin dir on PATH: $which_dir"
         else
-          echo "No nub-managed Node resolved (host Node on PATH); not fronting a Node bin dir."
+          echo "No nub-managed Node resolved; the runner's own Node stays on PATH."
         fi
 
         # Surface the documented pin-vs-hint divergence: with an explicit input we
@@ -600,7 +617,7 @@ runs:
         # the PROJECT pin at `nub`-invocation time, so they can differ. Compute the
         # project pin separately only to warn (cheap; no effect on the PATH front).
         if [ -n "$want" ]; then
-          proj="$(nub node which 2>/dev/null || true)"
+          proj="$(nub_cache node which 2>/dev/null || true)"
           proj="$(printf '%s' "$proj" | tr -d '\r')"; proj="${proj//\\//}"
           proj_ver="$(printf '%s' "$proj" | sed -n 's#.*/node/\([^/]*\)/.*#\1#p')"
           if [ -n "$proj_ver" ] && [ "$proj_ver" != "$ver" ]; then
