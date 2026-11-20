@@ -89,6 +89,64 @@ jobs:
           if command -v corepack >/dev/null 2>&1; then echo "corepack: $(corepack --version 2>/dev/null || echo '(disabled)')"; fi
           echo "PATH parity OK"
 
+  # A runner image that preinstalls a Node satisfying the requested version
+  # (ubuntu-26.04 ships 24.x in /usr/local/bin) must still get nub's cached Node
+  # fronted. nub's resolver prefers a satisfying PATH Node, which once fronted
+  # the image's /usr/local/bin, where `npm install -g npm` hits EACCES.
+  # `exact` asks for the runner's own version, which `nub node install` would
+  # otherwise skip as already on PATH; `range` takes the range-aware
+  # devEngines.runtime path, as `.node-version` reads no range.
+  runner-node-satisfies:
+    name: runner's Node satisfies the version, cache still fronted (${{ matrix.os }}, ${{ matrix.spec }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+        spec: [major, exact, range]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: version the runner's own Node satisfies
+        id: runner
+        shell: bash
+        env:
+          SPEC: ${{ matrix.spec }}
+        run: |
+          set -euo pipefail
+          echo "runner node: $(command -v node) $(node -v)"
+          major="$(node -p 'process.versions.node.split(".")[0]')"
+          case "$SPEC" in
+            major) want="$major" ;;
+            exact) want="$(node -p 'process.versions.node')" ;;
+            range) want="^${major}.0.0" ;;
+          esac
+          { echo "major=$major"; echo "want=$want"; } >> "$GITHUB_OUTPUT"
+      - uses: ./
+        with:
+          node-version: ${{ steps.runner.outputs.want }}
+          cache: false
+      - name: node and npm resolve into nub's cache; npm upgrades itself globally
+        shell: bash
+        env:
+          WANT: ${{ steps.runner.outputs.want }}
+          MAJOR: ${{ steps.runner.outputs.major }}
+          SPEC: ${{ matrix.spec }}
+        run: |
+          set -euo pipefail
+          cache="${XDG_CACHE_HOME:-$HOME/.cache}/nub/node/"
+          node_path="$(command -v node)"
+          npm_path="$(command -v npm)"
+          echo "node: $node_path ($(node -v)) / npm: $npm_path ($(npm -v))"
+          [[ "$node_path" == "$cache"* ]] || { echo "::error::node resolves to $node_path, not into $cache"; exit 1; }
+          [[ "$npm_path" == "$cache"* ]] || { echo "::error::npm resolves to $npm_path, not into $cache"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == "$MAJOR".* ]] || { echo "::error::node is $nv, expected $MAJOR.x"; exit 1; }
+          if [ "$SPEC" = exact ]; then [[ "$nv" == "$WANT" ]] || { echo "::error::node is $nv, expected $WANT"; exit 1; }; fi
+          # npm's own upgrade writes man5 pages, which the image's root-owned
+          # /usr/local/share/man refuses; a package with only a bin would pass there.
+          npm install -g npm@11.21.1
+          [[ "$(command -v npm)" == "$npm_path" && "$(npm -v)" == 11.21.1 ]] || { echo "::error::npm after the global upgrade is $(command -v npm) $(npm -v)"; exit 1; }
+
   path-parity-control:
     name: setup-node control — bare node == 20.x (${{ matrix.os }})
     strategy:
