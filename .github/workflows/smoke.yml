@@ -95,14 +95,15 @@ jobs:
   # the image's /usr/local/bin, where `npm install -g npm` hits EACCES.
   # `exact` asks for the runner's own version, which `nub node install` would
   # otherwise skip as already on PATH; `range` takes the range-aware
-  # devEngines.runtime path, as `.node-version` reads no range.
+  # devEngines.runtime path, as `.node-version` reads no range; `padded` is a
+  # range carrying the whitespace a `node-version: |` block scalar adds.
   runner-node-satisfies:
     name: runner's Node satisfies the version, cache still fronted (${{ matrix.os }}, ${{ matrix.spec }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-26.04]
-        spec: [major, exact, range]
+        spec: [major, exact, range, padded]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -119,8 +120,9 @@ jobs:
             major) want="$major" ;;
             exact) want="$(node -p 'process.versions.node')" ;;
             range) want="^${major}.0.0" ;;
+            padded) want=$'\n  >='"${major}"$'.0.0\t<'"$((major + 1))"$'.0.0\n' ;;
           esac
-          { echo "major=$major"; echo "want=$want"; } >> "$GITHUB_OUTPUT"
+          { echo "major=$major"; echo "want<<WANT_EOF"; printf '%s\n' "$want"; echo "WANT_EOF"; } >> "$GITHUB_OUTPUT"
       - uses: ./
         with:
           node-version: ${{ steps.runner.outputs.want }}
