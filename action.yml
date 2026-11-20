@@ -518,10 +518,35 @@ runs:
           esac
         fi
 
+        # An explicit version is authoritative for PATH: it is installed and
+        # resolved from a throwaway pin dir holding exactly `want`. A semver range
+        # (^24, >=22 <23, 24.x) goes in devEngines.runtime, the one pin nub reads a
+        # range from, and installs with a bare `nub node install`, which resolves
+        # it against the Node index; versions and aliases go in .node-version.
+        pin_probe=""
+        if [ -n "$want" ]; then
+          pin_probe="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")" || pin_probe=""
+        fi
+        pin_range=false
+        if [ -n "$pin_probe" ]; then
+          case "$want" in
+            lts|lts/*|latest|node|current) printf '%s\n' "$want" > "$pin_probe/.node-version" ;;
+            *[!0-9.vV]*)
+              pin_range=true
+              want_json="${want//\\/\\\\}"; want_json="${want_json//\"/\\\"}"
+              printf '{"devEngines":{"runtime":{"name":"node","version":"%s"}}}\n' "$want_json" > "$pin_probe/package.json" ;;
+            *) printf '%s\n' "$want" > "$pin_probe/.node-version" ;;
+          esac
+        fi
+
         if [ -n "$want" ]; then
           # Explicit warm-up override.
           echo "Provisioning Node ${want} into nub's cache"
-          nub_cache node install "$want" || echo "::warning::nub node install ${want} failed; nub will provision lazily at runtime"
+          if [ "$pin_range" = true ]; then
+            (cd "$pin_probe" && nub_cache node install) || echo "::warning::nub node install ${want} failed; nub will provision lazily at runtime"
+          else
+            nub_cache node install "$want" || echo "::warning::nub node install ${want} failed; nub will provision lazily at runtime"
+          fi
         else
           # Common case: resolve + install the project's own pin chain. A bare
           # `nub node install` exits non-zero with a "no Node pin" message when
@@ -561,14 +586,9 @@ runs:
         # pin from the (already cd'd) working directory. A single resolution is the
         # source of truth for both the path AND the version output — no re-resolve.
         why="${RUNNER_TEMP:-/tmp}/nub-why.$$"
-        pin_probe=""
-        if [ -n "$want" ]; then
-          pin_probe="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")" || pin_probe=""
-        fi
         if [ -n "$pin_probe" ]; then
-          # Explicit version is authoritative for PATH: resolve from a throwaway
-          # pin dir holding exactly `want`, in a subshell so cwd is undisturbed.
-          printf '%s\n' "$want" > "$pin_probe/.node-version"
+          # Explicit version: resolve from the pin dir written above, in a
+          # subshell so cwd is undisturbed.
           resolved="$( (cd "$pin_probe" && nub_cache node which) 2>"$why" || true)"
           reason="$(cat "$why" 2>/dev/null || true)"
           rm -rf "$pin_probe" "$why"
