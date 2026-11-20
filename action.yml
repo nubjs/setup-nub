@@ -518,6 +518,12 @@ runs:
           esac
         fi
 
+        # A version input can carry whitespace a YAML block scalar or a file adds
+        # (`node-version: |` ends in a newline; ranges may use tabs). Fold it to
+        # single spaces and trim, so the pin written below is one clean line.
+        want="$(printf '%s' "$want" | tr '\t\r\n' '   ' | tr -s ' ')"
+        want="${want# }"; want="${want% }"
+
         # An explicit version is authoritative for PATH: it is installed and
         # resolved from a throwaway pin dir holding exactly `want`. A semver range
         # (^24, >=22 <23, 24.x) goes in devEngines.runtime, the one pin nub reads a
